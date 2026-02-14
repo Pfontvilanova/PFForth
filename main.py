@@ -3,7 +3,7 @@
 PFForth - Python Forth Interpreter/Compiler
 
 Modos de uso:
-1. REPL interactivo de Forth: python main.py repl
+1. REPL interactivo de Forth: python main.py repl.
 2. Modo DSL de Python: python main.py (o python -i main.py)
 3. Ejecutar archivo Forth: python main.py archivo.fth
 
