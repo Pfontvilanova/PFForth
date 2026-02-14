@@ -1,5 +1,5 @@
 """
-PFForth Arithmetic - Mathematical operations
+PFForth Arithmetic - Mathematical operations.
 """
 
 import math
