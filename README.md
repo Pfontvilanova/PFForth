@@ -1,5 +1,7 @@
 # P. Font Forth
 
+ESTA ES UNA VERSION BETA, AUN EN PROCESO DE CREACIO.
+se ira actualizando periodicamente
 Forth directamente desde python.
 Para crear una versión de Forth que se pueda usar como un módulo o una biblioteca de Python, vamos a implementar un intérprete de Forth en Python. Esto te permitirá ejecutar palabras de Forth directamente desde un programa Python. A continuación se presenta un diseño básico de cómo podría lograrse esto.
 
