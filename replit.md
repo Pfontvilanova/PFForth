@@ -1,4 +1,4 @@
-# Overview
+# Overview.
 
 This project delivers a Python-based Forth interpreter and compiler, providing an interactive development environment with a Read-Eval-Print Loop (REPL). It supports core Forth operations, mathematics, control structures, user-defined words, variables, constants, and memory management within a 64KB space. The interpreter is case-sensitive, distinguishing between system primitives and user-defined words. The primary goal is to offer a robust, extensible, stack-based Forth environment suitable for diverse programming tasks.
 
