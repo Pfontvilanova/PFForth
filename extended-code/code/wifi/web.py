@@ -1,31 +1,32 @@
-# FORTH CODE WORD: code/wifi/browse
-# Open URL in web browser
+# FORTH CODE WORD: code/wifi/web
+# Open a URL in the system default web browser (stream interface)
 
-WORD_NAME = 'browse'
+WORD_NAME = '>web'
 #
 # === CÓDIGO FORTH ORIGINAL ===
-# ( url -- ) Open URL in system web browser
-# Compatible con a-Shell (iOS) y escritorio (Linux/macOS/Windows)
+# ( -- obj ) Crea un stream de salida que abre URLs en el navegador.
+# Uso:
+#   >web output-to
+#   s" ejemplo.com" type cr    \ cr dispara la apertura
+#   output-to-console
+# Compatible con a-Shell (iOS) y escritorio.
 # === FIN CÓDIGO FORTH ===
 
-def execute(forth):
-    if not forth.stack:
-        print("Error: BROWSE requiere URL")
-        return
 
-    url = str(forth.stack.pop())
+def _open_url(url):
+    """Abre una URL usando el método adecuado según la plataforma."""
+    import sys
+    import subprocess
+
+    url = url.strip()
+    if not url:
+        return
     if not url.startswith('http'):
         url = 'https://' + url
 
     print(f"Abriendo: {url}")
-    _open_url(url)
 
-
-def _open_url(url):
-    import sys
-    import subprocess
-
-    # a-Shell / iOS: usar comando 'open' del sistema
+    # a-Shell / iOS
     if sys.platform == 'ios' or _is_ashell():
         try:
             subprocess.run(['open', url], check=False)
@@ -67,12 +68,32 @@ def _open_url(url):
 
 
 def _is_ashell():
-    """Detecta si estamos en a-Shell (iPad/iPhone)"""
     import os
-    # a-Shell define esta variable de entorno
     if os.environ.get('TERM_PROGRAM') == 'a-Shell':
         return True
-    # Alternativa: detectar por la existencia de rutas típicas de a-Shell
     if os.path.exists('/var/mobile') or os.path.exists('/private/var/mobile'):
         return True
     return False
+
+
+def execute(forth):
+    forth_ref = forth
+
+    class _WebBrowserOutput:
+        def __init__(self):
+            self._buf = ''
+
+        def write(self, s):
+            self._buf += s
+            if '\n' in self._buf:
+                parts = self._buf.split('\n')
+                for url in parts[:-1]:
+                    _open_url(url)
+                self._buf = parts[-1]
+
+        def flush(self):
+            if self._buf.strip():
+                _open_url(self._buf)
+                self._buf = ''
+
+    forth.stack.append(_WebBrowserOutput())

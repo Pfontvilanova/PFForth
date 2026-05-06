@@ -4,9 +4,11 @@
 WORD_NAME = 'bind'
 #
 # === CÓDIGO FORTH ORIGINAL ===
-# ( sock port -- flag ) Bind socket to local port
+# ( sock port -- sock flag ) Bind socket to local port
 # Returns -1 on success, 0 on failure
 # === FIN CÓDIGO FORTH ===
+
+import socket
 
 def execute(forth):
     def push(val):
@@ -24,8 +26,12 @@ def execute(forth):
     sock = pop()
     
     try:
-        sock.setsockopt(1, 2, 1)  # SOL_SOCKET, SO_REUSEADDR
-        sock.bind(('0.0.0.0', port))
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # Try '' first (works on iOS/a-Shell), fallback to '0.0.0.0'
+        try:
+            sock.bind(('', port))
+        except OSError:
+            sock.bind(('0.0.0.0', port))
         push(sock)
         push(-1)
     except Exception as e:
