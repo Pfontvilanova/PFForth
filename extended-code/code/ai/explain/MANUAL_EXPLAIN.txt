@@ -1,0 +1,95 @@
+══════════════════════════════════════════════════════════
+  MÓDULO AI/EXPLAIN — Explicaciones en lenguaje natural
+══════════════════════════════════════════════════════════
+Carga: import code/ai/explain/<palabra>
+       import code/ai/explain/explain
+       import code/ai/explain/aiwhy
+       import code/ai/explain/ainext
+       import code/ai/explain/aiverbose
+       import code/ai/explain/aiquiet
+
+──────────────────────────────────────────────────────────
+PALABRAS
+──────────────────────────────────────────────────────────
+
+explain         ( -- )
+  Narra en lenguaje natural lo que hizo la última operación
+  AI: qué datos se procesaron, qué resultó, métricas clave.
+  Ejemplo:
+    s" iris.csv" data-load   \ carga datos
+    explain                  \ "Se cargó iris.csv con 150 filas..."
+
+ai-why          ( -- )
+  Interpreta los resultados de la última operación: por qué
+  el score es alto/bajo, si hay riesgo de sobreajuste, si los
+  clusters son buenos, etc. Añade contexto cualitativo.
+  Ejemplo:
+    rf-model model-train
+    ai-why    \ "Score 0.98 en train — posible sobreajuste..."
+
+ai-next         ( -- )
+  Sugiere el siguiente paso lógico según la operación anterior
+  y el estado actual (¿hay target? ¿hay split? ¿hay modelo?).
+  Da comandos Forth concretos y listos para copiar.
+  Ejemplo:
+    data-split
+    ai-next   \ "rf-model model-train   \ Random Forest..."
+
+ai-verbose      ( -- )
+  Activa el modo detallado. A partir de ese momento, cada
+  operación AI imprime una explicación breve automáticamente.
+  Equivale a tener 'explain' después de cada comando AI.
+
+ai-quiet        ( -- )
+  Desactiva el modo detallado. Salida mínima (por defecto).
+
+──────────────────────────────────────────────────────────
+FLUJO TÍPICO
+──────────────────────────────────────────────────────────
+
+\ Opción A: preguntas manuales
+  s" datos.csv" data-load
+  explain           \ ¿qué ocurrió?
+  ai-why            \ ¿por qué esos valores?
+  ai-next           \ ¿qué hago ahora?
+
+\ Opción B: modo automático
+  ai-verbose
+  s" datos.csv" data-load
+  data-info
+  s" precio" data-target
+  data-split
+  rf-model model-train
+  model-eval
+  ai-quiet          \ vuelve al modo silencioso
+
+\ Las tres preguntas se pueden encadenar:
+  rf-model model-train
+  explain ai-why ai-next
+
+──────────────────────────────────────────────────────────
+OPERACIONES CUBIERTAS
+──────────────────────────────────────────────────────────
+
+DATA  : data-load, data-fill, data-norm, data-split
+PATTERN: pat-find, pat-corr, pat-cluster, pat-pca,
+         pat-anomaly, pat-sequence
+MODEL : model-train, model-eval, model-predict,
+        model-importance, model-cv, model-save, model-load
+
+──────────────────────────────────────────────────────────
+IMPLEMENTACIÓN
+──────────────────────────────────────────────────────────
+
+Motor compartido: extended-code/code/ai/explain/_explain_engine.py
+  · 100% rule-based, sin LLM
+  · Lee forth._ai['last_op'] — poblado por cada operación AI
+  · Tres funciones principales: explain(), ai_why(), ai_next()
+  · Tablas de despacho por tipo de operación (17 tipos cubiertos)
+
+Estructura de last_op (estándar de todos los módulos AI):
+  { 'type': str,      \ nombre de la operación
+    'data': dict,     \ parámetros de entrada
+    'metrics': dict   \ resultados numéricos }
+
+──────────────────────────────────────────────────────────
