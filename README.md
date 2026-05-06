@@ -1,5 +1,5 @@
 Pfforth language is a forth with python primitives. you need to see the wiki tab for a user manual.
-you can run it in every deveice with python an at less 1MB of memory, better more than 5 MB.
+you can run it in every device with python an at less 1MB of memory, better more than 5 MB.
 To run it you must download the folders and the files to your computer. 
 then run python.
 
