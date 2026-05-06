@@ -9,12 +9,14 @@ f = InteractiveForth()
 this is the python interactive way, if you want the rel mode you mus do also:
 f.repl()
 and you will see the 
-ok> in the screen. On ipad I use A-shell and jupyter notebook, in mac the terminal. A-shell also in Iphone.
+ok> in the screen. On ipad I use A-shell and jupyter notebook, in mac the terminal.
+A-shell also in Iphone.
 
 A second way is: from terminal
 python main.py
 appears
->>> on screen. is python way, you can use python interactive mode, and if you want the repl mode you need also write:
+>>> on screen. is python way, you can use python interactive mode, and 
+if you want the repl mode you need also write:
 f.repl()
 
 The next is how I start from A-shell on my Ipad:
