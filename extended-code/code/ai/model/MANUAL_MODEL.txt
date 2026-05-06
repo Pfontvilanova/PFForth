@@ -1,0 +1,535 @@
+════════════════════════════════════════════════════════════════════════════════
+  MÓDULO AI · MODEL — Manual completo
+  Vocabulario de predicción con aprendizaje automático
+════════════════════════════════════════════════════════════════════════════════
+
+¿Para qué sirve este módulo?
+──────────────────────────────────────────────────────────────────────────────
+El módulo MODEL te permite entrenar modelos de aprendizaje automático sobre
+tus datos, evaluarlos con rigor y guardarlos para reutilizarlos más adelante.
+
+En términos sencillos: le das al sistema ejemplos (filas de datos + una
+respuesta que ya conoces) y el modelo aprende a predecir esa respuesta para
+filas nuevas.
+
+Dos tipos de predicción soportados:
+
+  • CLASIFICACIÓN — la respuesta es una categoría discreta
+    Ejemplos: ¿aprueba o suspende? ¿fraude o no fraude? ¿A / B / C / D?
+    Se detecta automáticamente si la columna objetivo tiene ≤ 10 valores únicos.
+
+  • REGRESIÓN — la respuesta es un número continuo
+    Ejemplos: ¿cuál será la nota? ¿qué precio tendrá? ¿cuántos km recorrerá?
+    Se detecta automáticamente si la columna objetivo tiene > 10 valores únicos.
+
+
+════════════════════════════════════════════════════════════════════════════════
+  FLUJO BÁSICO DE TRABAJO
+════════════════════════════════════════════════════════════════════════════════
+
+El orden recomendado es siempre el mismo:
+
+  1. Cargar y preparar datos     → módulo DATA  (data-load, data-target,
+                                               data-norm, data-split)
+  2. Elegir algoritmo            → rf-model / tree-model / knn-model / svm-model
+  3. Entrenar                    → model-train
+  4. Evaluar con datos de prueba → model-eval  + model-matrix + model-predict
+  5. Entender el modelo          → model-importance
+  6. Validar de forma robusta    → model-cv
+  7. Guardar para reutilizar     → model-save  /  model-load
+
+
+════════════════════════════════════════════════════════════════════════════════
+  ALGORITMOS DISPONIBLES
+════════════════════════════════════════════════════════════════════════════════
+
+──────────────────────────────────────────────────────────────────────────────
+  rf-model   ( -- )   Random Forest
+──────────────────────────────────────────────────────────────────────────────
+  El más robusto y versátil. Construye muchos árboles de decisión y combina
+  su resultado. Casi siempre da buenos resultados sin ajuste fino.
+
+  Ventajas:
+  • No necesita normalización de datos (data-norm opcional)
+  • Muy estable frente a valores extremos o datos ruidosos
+  • Funciona bien en clasificación y regresión
+  • Ofrece importancia de variables nativa (rapidísima)
+
+  Inconvenientes:
+  • Es una "caja negra" — no muestra reglas explícitas
+  • Modelos grandes pueden ocupar bastante espacio en disco
+
+  Cuándo usarlo: cuando no sabes qué algoritmo elegir, empieza aquí.
+
+──────────────────────────────────────────────────────────────────────────────
+  tree-model   ( -- )   Árbol de decisión
+──────────────────────────────────────────────────────────────────────────────
+  Un único árbol de decisión que divide los datos con reglas del tipo
+  "si X > 5 y Y < 2 → clase A". Muy fácil de entender e interpretar.
+
+  Ventajas:
+  • Completamente interpretable (puedes ver cada regla)
+  • Muy rápido de entrenar (incluso con miles de filas)
+  • model-importance muestra las reglas más influyentes con precisión
+
+  Inconvenientes:
+  • Tiende al sobreajuste si no se limita la profundidad
+  • Menos preciso que Random Forest
+
+  Cuándo usarlo: cuando necesitas explicar por qué el modelo decidió algo.
+
+──────────────────────────────────────────────────────────────────────────────
+  knn-model   ( [k] -- )   K-Nearest Neighbors
+──────────────────────────────────────────────────────────────────────────────
+  Clasifica o predice un dato nuevo mirando sus k vecinos más cercanos en el
+  espacio de variables. Extremadamente intuitivo.
+
+  Uso:
+    knn-model            → usa k=5 por defecto
+    3 knn-model          → usa k=3 (número impar recomendado)
+    7 knn-model          → usa k=7
+
+  Ventajas:
+  • Sin suposiciones sobre la distribución de los datos
+  • Muy simple de entender: "los vecinos deciden"
+
+  Inconvenientes:
+  • Requiere normalización previa (data-norm) — MUY importante
+  • Lento con datasets grandes
+  • Sensible a variables irrelevantes
+
+  Cuándo usarlo: datasets pequeños-medianos, ya normalizados, para comparar
+  con RF y ver si el resultado es consistente.
+
+──────────────────────────────────────────────────────────────────────────────
+  svm-model   ( -- )   Support Vector Machine (kernel RBF)
+──────────────────────────────────────────────────────────────────────────────
+  Encuentra el hiperplano que mejor separa las clases dejando el mayor margen
+  posible entre ellas. Con kernel RBF maneja relaciones no lineales.
+
+  Ventajas:
+  • Muy potente con datos de alta dimensión (muchas variables)
+  • Funciona bien incluso con pocos datos de entrenamiento
+  • Robusto frente al sobreajuste en clasificación
+
+  Inconvenientes:
+  • Requiere normalización previa (data-norm) — imprescindible
+  • Sin importancia de variables nativa (usa permutación — más lento)
+  • Menos interpretable que árbol o KNN
+
+  Cuándo usarlo: cuando hay pocas filas pero muchas variables, o cuando RF
+  no da buenos resultados.
+
+
+════════════════════════════════════════════════════════════════════════════════
+  ENTRENAMIENTO Y EVALUACIÓN — REFERENCIA DE PALABRAS
+════════════════════════════════════════════════════════════════════════════════
+
+──────────────────────────────────────────────────────────────────────────────
+  model-train   ( -- )
+──────────────────────────────────────────────────────────────────────────────
+  Entrena el algoritmo configurado usando el conjunto de entrenamiento (el 80%
+  reservado por data-split).
+
+  Muestra:
+  • Algoritmo y tarea detectada (clasificación / regresión)
+  • Variables usadas y número de filas
+  • Tiempo de entrenamiento
+  • Score en los datos de entrenamiento
+  • Aviso si el score es 1.000 con dataset pequeño (posible sobreajuste)
+
+  Nota: puedes cambiar de algoritmo y volver a ejecutar model-train tantas
+  veces como quieras — los datos no cambian, solo el modelo.
+
+──────────────────────────────────────────────────────────────────────────────
+  model-eval   ( -- score )
+──────────────────────────────────────────────────────────────────────────────
+  Evalúa el modelo con el conjunto de prueba (el 20% que el modelo nunca vio).
+  Deja el score principal en la pila.
+
+  Para CLASIFICACIÓN muestra:
+  • Accuracy   — % de predicciones correctas
+  • F1         — equilibrio entre precisión y recall
+  • Precisión  — cuando dice "sí", ¿cuántas veces acierta?
+  • Recall     — de los "sí" reales, ¿cuántos detecta?
+  • Comparación train vs test (detecta sobreajuste)
+
+  Para REGRESIÓN muestra:
+  • R²         — % de variabilidad explicada (más alto = mejor)
+  • RMSE       — error típico en las unidades originales
+  • MAE        — error medio absoluto
+  • Comparación train vs test
+
+──────────────────────────────────────────────────────────────────────────────
+  model-predict   ( -- )
+──────────────────────────────────────────────────────────────────────────────
+  Muestra una tabla fila a fila comparando el valor real con el predicho.
+
+  Para CLASIFICACIÓN:
+  • Columna de confianza (probabilidad del modelo en su predicción)
+  • Marca los errores con ✗ y lista las filas fallidas
+  • Nota: confianza baja (< 0.70) indica casos en los que el modelo duda
+
+  Para REGRESIÓN:
+  • Error en valor absoluto y porcentaje por fila
+  • Marca automáticamente el peor caso
+  • Detecta si el modelo sobreestima o subestima sistemáticamente
+
+──────────────────────────────────────────────────────────────────────────────
+  model-matrix   ( -- )
+──────────────────────────────────────────────────────────────────────────────
+  Para CLASIFICACIÓN: Matriz de confusión visual.
+  • Muestra qué clases se confunden entre sí
+  • Análisis binario completo: TP, TN, FP, FN, sensibilidad, especificidad
+  • Avisa si hay tendencia a Falsos Positivos o Falsos Negativos
+
+  Para REGRESIÓN: Histograma de distribución de errores.
+  • Muestra si los errores están centrados en cero (buen modelo)
+  • Detecta sesgo sistemático (modelo que siempre sobreestima o subestima)
+
+  Cómo leer la matriz de confusión:
+  • Cada FILA = clase real
+  • Cada COLUMNA = clase predicha
+  • Los valores en la DIAGONAL = aciertos
+  • Fuera de la diagonal = errores
+
+──────────────────────────────────────────────────────────────────────────────
+  model-importance   ( -- imp_top )
+──────────────────────────────────────────────────────────────────────────────
+  Muestra qué variables pesan más en las decisiones del modelo.
+  Deja la importancia de la variable #1 en la pila.
+
+  Para RF y Tree: usa la importancia Gini nativa del modelo (instantánea).
+  Para KNN y SVM: usa importancia por permutación (tarda unos segundos).
+
+  Muestra:
+  • Ranking de variables con barras visuales y porcentaje acumulado
+  • Cuántas variables concentran el 80% del peso
+  • Variables casi irrelevantes (sugiere eliminarlas con data-drop)
+
+──────────────────────────────────────────────────────────────────────────────
+  model-cv   ( [n] -- score_medio )
+──────────────────────────────────────────────────────────────────────────────
+  Validación cruzada: divide el conjunto de entrenamiento en n partes, entrena
+  con n-1 y evalúa con 1, repitiendo el ciclo n veces.
+  Deja el score medio en la pila.
+
+  Uso:
+    model-cv          → 5 pliegues por defecto
+    10 model-cv       → 10 pliegues (más robusto, más lento)
+    3 model-cv        → 3 pliegues (rápido, para datasets pequeños)
+
+  Muestra:
+  • Score de cada pliegue con barra visual
+  • Media y desviación estándar
+  • Intervalo de confianza al 95%
+  • Alerta si hay alta variabilidad entre pliegues (> 15%)
+  • Comparación con el score de entrenamiento completo
+
+  Por qué usarlo: model-eval da un solo número. model-cv da una estimación
+  mucho más robusta de cómo se comportará el modelo con datos nuevos.
+
+──────────────────────────────────────────────────────────────────────────────
+  model-save   ( nombre -- )
+──────────────────────────────────────────────────────────────────────────────
+  Guarda el modelo entrenado en disco. Si se usó data-norm, el scaler también
+  se guarda para poder normalizar futuros datos de la misma forma.
+
+  Uso:
+    s" mi_modelo" model-save        → guarda en models/mi_modelo.pkl
+
+  El directorio models/ se crea automáticamente si no existe.
+
+──────────────────────────────────────────────────────────────────────────────
+  model-load   ( nombre -- )
+──────────────────────────────────────────────────────────────────────────────
+  Carga un modelo guardado y restaura el estado AI completo.
+  Si el nombre no existe, lista los modelos disponibles.
+
+  Uso:
+    s" mi_modelo" model-load        → carga models/mi_modelo.pkl
+
+  Tras cargar el modelo puedes usar directamente:
+    model-eval, model-predict, model-cv, model-importance
+
+
+════════════════════════════════════════════════════════════════════════════════
+  MÉTRICAS — QUÉ SIGNIFICAN Y CUÁNDO SON BUENAS
+════════════════════════════════════════════════════════════════════════════════
+
+CLASIFICACIÓN
+─────────────
+  Accuracy   ¿cuántas predicciones son correctas en total?
+             > 0.90 excelente  /  0.75-0.90 bueno  /  < 0.60 revisar datos
+
+  F1         equilibrio entre precisión y recall
+             Útil cuando las clases están desbalanceadas (muchos de una clase,
+             pocos de otra). Si accuracy y F1 difieren mucho, hay desbalance.
+
+  Precisión  cuando el modelo predice "sí", ¿cuántas veces tiene razón?
+             Importante cuando un falso positivo es costoso.
+             Ejemplo: diagnóstico de enfermedad grave (no quieres alarmar en vano)
+
+  Recall     de todos los "sí" reales, ¿cuántos detecta el modelo?
+             Importante cuando un falso negativo es costoso.
+             Ejemplo: detección de fraude (no quieres que se te escape ninguno)
+
+REGRESIÓN
+─────────
+  R²         entre 0 y 1. Indica qué porcentaje de la variabilidad de los
+             datos explica el modelo.
+             R²=0.85 → el modelo explica el 85% de la variación de los datos.
+             R² < 0  → el modelo es peor que predecir siempre la media.
+
+  RMSE       error típico en las mismas unidades que el objetivo.
+             Si predices notas (0-10) y RMSE=0.6 → el error medio es ±0.6 puntos.
+
+  MAE        error medio absoluto (menos sensible a valores extremos que RMSE).
+
+SOBREAJUSTE (overfitting)
+─────────────────────────
+  Ocurre cuando el modelo "memoriza" los datos de entrenamiento pero no
+  generaliza bien a datos nuevos.
+
+  Señales:
+  • Score en train muy alto (1.000) pero score en test mucho más bajo
+  • Gap train-test > 0.15 en clasificación o > 0.20 en regresión
+
+  Soluciones:
+  • Usar model-cv para una estimación más honesta
+  • Cambiar a un modelo más simple (tree-model limita la profundidad)
+  • Eliminar variables irrelevantes (model-importance → data-drop)
+  • Conseguir más datos de entrenamiento
+
+
+════════════════════════════════════════════════════════════════════════════════
+  EJEMPLOS COMPLETOS
+════════════════════════════════════════════════════════════════════════════════
+
+──────────────────────────────────────────────────────────────────────────────
+  Ejemplo 1 — Clasificación básica (¿aprueba o suspende?)
+──────────────────────────────────────────────────────────────────────────────
+
+  \ Preparar datos
+  import code/ai/data/dataload
+  import code/ai/data/datatarget
+  import code/ai/data/datanorm
+  import code/ai/data/datashuffle
+  import code/ai/data/datasplit
+
+  \ Importar modelo
+  import code/ai/model/rfmodel
+  import code/ai/model/modeltrain
+  import code/ai/model/modeleval
+  import code/ai/model/modelmatrix
+  import code/ai/model/modelimportance
+  import code/ai/model/modelcv
+  import code/ai/model/modelsave
+
+  \ Flujo
+  s" alumnos.csv"  data-load
+  s" aprobado"     data-target
+  data-norm
+  data-shuffle
+  0.2 data-split   2drop
+
+  rf-model
+  model-train
+  model-eval
+  model-matrix
+  model-importance
+  5 model-cv
+
+  s" modelo_alumnos" model-save
+
+──────────────────────────────────────────────────────────────────────────────
+  Ejemplo 2 — Regresión (predecir nota numérica)
+──────────────────────────────────────────────────────────────────────────────
+
+  s" alumnos.csv"  data-load
+  s" nota"         data-target    \ objetivo continuo → detecta regresión
+  data-norm
+  0.2 data-split   2drop
+
+  rf-model
+  model-train
+  model-eval      \ muestra R², RMSE, MAE
+  model-matrix    \ histograma de distribución de errores
+  model-predict   \ tabla real vs predicho con % de error por fila
+
+──────────────────────────────────────────────────────────────────────────────
+  Ejemplo 3 — Comparar dos algoritmos
+──────────────────────────────────────────────────────────────────────────────
+
+  s" datos.csv" data-load
+  s" clase"     data-target
+  data-norm
+  0.2 data-split 2drop
+
+  \ Probar RF
+  rf-model  model-train  model-eval  .   \ score en pila → ej. 0.923
+  cr
+
+  \ Probar KNN con k=7
+  7 knn-model  model-train  model-eval  .   \ ej. 0.891
+
+  \ Quedarse con el mejor (RF en este caso) y guardarlo
+  rf-model  model-train
+  s" mejor_modelo" model-save
+
+──────────────────────────────────────────────────────────────────────────────
+  Ejemplo 4 — Validación cruzada como métrica principal
+──────────────────────────────────────────────────────────────────────────────
+
+  \ Cuando el dataset es pequeño (< 200 filas), model-cv es más fiable
+  \ que un simple train/test split
+
+  s" datos_pequenos.csv" data-load
+  s" resultado"          data-target
+  data-norm
+  data-shuffle
+  0.2 data-split 2drop
+
+  tree-model
+  model-train
+  10 model-cv     \ 10 pliegues para mayor robustez
+  .               \ ver score medio en pila
+
+──────────────────────────────────────────────────────────────────────────────
+  Ejemplo 5 — Cargar modelo en otra sesión y predecir
+──────────────────────────────────────────────────────────────────────────────
+
+  \ En una sesión nueva, sin re-entrenar
+  import code/ai/model/modelload
+  import code/ai/model/modeleval
+  import code/ai/model/modelpredict
+
+  \ Cargar datos nuevos de prueba
+  import code/ai/data/dataload
+  import code/ai/data/datatarget
+  import code/ai/data/datanorm
+  import code/ai/data/datasplit
+
+  s" nuevos_datos.csv" data-load
+  s" aprobado"         data-target
+  data-norm
+  0.2 data-split 2drop
+
+  \ Cargar el modelo guardado
+  s" modelo_alumnos" model-load
+
+  \ Evaluar y predecir
+  model-eval
+  model-predict
+
+──────────────────────────────────────────────────────────────────────────────
+  Ejemplo 6 — Flujo completo DATA → PATTERN → MODEL
+──────────────────────────────────────────────────────────────────────────────
+
+  \ DATA
+  s" ventas.csv" data-load
+  s" exito"      data-target
+  data-info
+  s" mean" data-fill    \ rellenar nulos con la media
+  data-norm
+  data-shuffle
+  0.2 data-split 2drop
+
+  \ PATTERN (análisis exploratorio opcional pero recomendado)
+  import code/ai/pattern/patcorr
+  import code/ai/pattern/patfind
+  pat-corr            \ ver qué variables correlacionan con "exito"
+  pat-find            \ detectar anomalías o distribuciones raras
+
+  \ MODEL
+  rf-model
+  model-train
+  model-eval
+  model-importance    \ ¿qué variables son clave?
+  model-matrix        \ analizar tipo de errores
+  5 model-cv          \ validar de forma robusta
+  s" modelo_ventas" model-save
+
+
+════════════════════════════════════════════════════════════════════════════════
+  GUÍA RÁPIDA DE ELECCIÓN DE ALGORITMO
+════════════════════════════════════════════════════════════════════════════════
+
+  ¿No sabes cuál usar?              → rf-model   (siempre es un buen punto de partida)
+  ¿Necesitas explicar las reglas?   → tree-model (las reglas son visibles)
+  ¿Tienes datos normalizados?       → knn-model  (simple e intuitivo)
+  ¿Pocas filas, muchas variables?   → svm-model  (robusto en alta dimensión)
+
+  ┌───────────────┬──────────┬────────────┬──────────────┬───────────────┐
+  │ Criterio      │ rf-model │ tree-model │   knn-model  │   svm-model   │
+  ├───────────────┼──────────┼────────────┼──────────────┼───────────────┤
+  │ Sin norm.     │    ✓     │     ✓      │  ✗ necesita  │  ✗ necesita   │
+  │ Interpretable │    ~     │     ✓✓     │      ~       │       ✗       │
+  │ Datos grandes │    ✓     │     ✓      │      ✗       │       ~       │
+  │ Datos pequeños│    ✓     │     ~      │      ✓       │       ✓       │
+  │ Importancia   │    ✓✓    │     ✓✓     │  permutación │  permutación  │
+  │ Velocidad     │    ~     │     ✓✓     │      ✓       │       ~       │
+  └───────────────┴──────────┴────────────┴──────────────┴───────────────┘
+
+
+════════════════════════════════════════════════════════════════════════════════
+  ERRORES FRECUENTES Y SOLUCIONES
+════════════════════════════════════════════════════════════════════════════════
+
+  "Error: modelo no entrenado"
+  → Ejecuta primero: rf-model  model-train
+
+  "Error: no hay conjunto de prueba"
+  → Ejecuta primero: 0.2 data-split 2drop
+
+  "Error: no hay columna objetivo"
+  → Ejecuta primero: s" nombre_columna" data-target
+
+  "Accuracy 1.000 en train pero baja en test"
+  → Sobreajuste. Prueba: tree-model (más simple), más datos, o data-drop
+    para eliminar variables irrelevantes detectadas con model-importance
+
+  "KNN o SVM dan peores resultados que RF"
+  → Comprueba que usaste data-norm antes. Estos algoritmos son sensibles
+    a la escala de los datos.
+
+  "model-load: archivo no encontrado"
+  → La palabra lista los modelos disponibles en models/
+  → Recuerda que el nombre puede incluir o no la extensión .pkl
+
+  "R² negativo en regresión"
+  → El modelo es peor que predecir siempre la media. Posibles causas:
+    - Variables equivocadas (model-importance puede ayudar)
+    - Datos con mucho ruido o sin relación real con el objetivo
+    - Falta de normalización (prueba data-norm + svm-model o knn-model)
+
+
+════════════════════════════════════════════════════════════════════════════════
+  RESUMEN DE PALABRAS — REFERENCIA RÁPIDA
+════════════════════════════════════════════════════════════════════════════════
+
+  ALGORITMO (elegir uno)
+    rf-model          ( -- )         Random Forest
+    tree-model        ( -- )         Árbol de decisión
+    knn-model         ( [k] -- )     KNN; k opcional en pila (defecto 5)
+    svm-model         ( -- )         SVM con kernel RBF
+
+  ENTRENAMIENTO
+    model-train       ( -- )         Entrena con train_set
+
+  EVALUACIÓN
+    model-eval        ( -- score )   Métricas en test_set; score en pila
+    model-predict     ( -- )         Tabla real vs predicho
+    model-matrix      ( -- )         Matriz de confusión / histograma errores
+    model-importance  ( -- imp )     Importancia de variables; imp#1 en pila
+    model-cv          ( [n] -- med ) Validación cruzada; score medio en pila
+
+  PERSISTENCIA
+    model-save        ( nombre -- )  Guarda en models/<nombre>.pkl
+    model-load        ( nombre -- )  Carga y restaura estado AI
+
+  DEPENDENCIAS EXTERNAS
+    scikit-learn      — todos los algoritmos y métricas
+    joblib            — model-save / model-load (incluido con scikit-learn)
+
+════════════════════════════════════════════════════════════════════════════════
