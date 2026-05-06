@@ -17,6 +17,7 @@ class ForthCompiler:
         self.words['measure'] = self._measure_stub
         self.words[':measure'] = self._measure_from_stack
         self.words['forget'] = self._forget
+        self.words['edit'] = self._edit_word
         self.words['definitions'] = self._show_definitions
         
         self.words["'"] = self._tick
@@ -31,8 +32,6 @@ class ForthCompiler:
         
         self.words[':noname'] = self._noname_word
         self.words['immediate-words'] = self._list_immediate_words
-        self.words['tick-demo'] = self._tick_demo
-        
         self.immediate_words['immediate'] = self._immediate
         self.immediate_words['postpone'] = self._postpone
         self.immediate_words['create'] = self._create
@@ -56,14 +55,6 @@ class ForthCompiler:
     
     def _list_immediate_words(self):
         print("Palabras inmediatas:", list(self.immediate_words.keys()))
-        return self
-    
-    def _tick_demo(self):
-        print("\n=== DEMOSTRACIÓN ' Y EXECUTE ===")
-        print("Stack actual:", self.stack)
-        all_words = [w for w in list(self.words.keys()) + list(self.immediate_words.keys())
-                    if not w.startswith('_') and w not in ['tick-demo']]
-        print("Palabras disponibles:", all_words[:10])
         return self
     
     def _list_words(self):
@@ -177,6 +168,89 @@ class ForthCompiler:
         self._definition_order = self._definition_order[:target_index]
         print(f"Olvidadas {len(definitions_to_remove)} definiciones desde '{target_name}'")
     
+    def _edit_word(self, word_name=None):
+        """Edit a user-defined word in place, preserving its position in _definition_order."""
+        if word_name is None:
+            if self.stack:
+                word_name = self.stack.pop()
+            else:
+                print("Error: edit requiere un nombre de palabra")
+                return
+        
+        if word_name not in self._definition_source:
+            if word_name in self.words or word_name in self.immediate_words:
+                print(f"Error: '{word_name}' es una primitiva del sistema y no puede editarse")
+            else:
+                print(f"Error: '{word_name}' no existe o no es una palabra de usuario")
+            return
+        
+        get_input = getattr(self, '_repl_input_fn', None) or input
+        
+        print(f"Definición actual de '{word_name}':")
+        self._see_word(word_name)
+        print(f"Introduce la nueva definición (termina con ';'):")
+        
+        accumulated = f": {word_name} "
+        while True:
+            try:
+                line = get_input("EDIT> ")
+            except (EOFError, KeyboardInterrupt):
+                print("\nEdición cancelada")
+                return
+            accumulated += line + " "
+            if ';' in line.split():
+                break
+        
+        original_index = None
+        for i, (def_type, name) in enumerate(self._definition_order):
+            if name == word_name:
+                original_index = i
+                break
+        
+        old_source = self._definition_source.get(word_name)
+        len_before = len(self._definition_order)
+        self.execute(accumulated)
+        
+        if original_index is not None and len(self._definition_order) > len_before:
+            self._definition_order.pop()
+        
+        new_source = self._definition_source.get(word_name)
+        if new_source is not None and new_source != old_source:
+            self._update_inline_cache(word_name)
+            print(f"ok '{word_name}' actualizada")
+        elif self._last_defined_word == word_name:
+            self._update_inline_cache(word_name)
+            print(f"ok '{word_name}' actualizada")
+        else:
+            print(f"Error: no se pudo actualizar '{word_name}'")
+    
+    def _update_inline_cache(self, edited_name):
+        """Actualiza las referencias en caché a edited_name en todos los cuerpos
+        compilados de palabras de usuario. Las tuplas ('cached', name, fn) son
+        inmutables, pero están dentro de listas mutables capturadas por referencia
+        en los closures — por eso reemplazar el elemento de la lista sí afecta
+        a las llamadas futuras de esas palabras."""
+        new_fn = self.words.get(edited_name)
+        if new_fn is None:
+            return
+
+        # Todas las palabras de usuario excepto la recién editada
+        user_names = [name for (_, name) in self._definition_order
+                      if name != edited_name and name in self.words]
+
+        for name in user_names:
+            fn = self.words[name]
+            # El cuerpo compilado está en el primer argumento por defecto del closure
+            if not (hasattr(fn, '__defaults__') and fn.__defaults__):
+                continue
+            compiled = fn.__defaults__[0]
+            if not isinstance(compiled, list):
+                continue
+            for i, op in enumerate(compiled):
+                if (isinstance(op, tuple) and len(op) == 3
+                        and op[0] == 'cached' and op[1] == edited_name):
+                    compiled[i] = ('cached', edited_name, new_fn)
+
     def _remove_definition(self, def_type, name):
         """Remove a definition by type and name"""
         if def_type in ('word', 'immediate', 'code', 'created'):

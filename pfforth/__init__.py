@@ -19,6 +19,7 @@ from .compiler import ForthCompiler
 from .io_words import ForthIO
 from .persistence import ForthPersistence
 from .optimizations import ForthOptimizations
+from .actors import ForthActors
 from .repl import ForthREPL, InteractiveForth
 
 __all__ = ['InteractiveForth', 'ForthException']

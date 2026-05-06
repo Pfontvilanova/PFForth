@@ -26,6 +26,8 @@ class ForthIO:
         self.words['mem>s'] = self._mem_to_s
         self.words['parse'] = self._parse
         self.words['pwd'] = self._pwd
+        self.words['dir'] = self._dir
+        self.words['cd'] = self._cd
         self.words['>str'] = self._to_str
         self.words['str>'] = self._str_to_num
         
@@ -63,23 +65,48 @@ class ForthIO:
         self.words['number'] = self._number
         self.words['>number'] = self._to_number
         self.words['.dec'] = self._dot_dec
-    
+
+        self.words['output-to']         = self._output_to
+        self.words['output-to-console'] = self._output_to_console
+        self.words['output-to-string']  = self._output_to_string
+        self.words['output-get-string'] = self._output_get_string
+        self.words['input-from-string'] = self._input_from_string
+        self.words['input-from-console']= self._input_from_console
+        self.words['input-to']          = self._input_to
+        self.words['output-stream?']    = self._output_stream_query
+        self.words['input-stream?']     = self._input_stream_query
+
+        self._original_stdin  = sys.stdin
+        self._string_buffer   = None
+        self._forth_output    = sys.stdout
+        self._forth_input     = sys.stdin
+
     def _emit(self):
         if self.stack:
             code = int(self.stack.pop())
-            print(chr(code), end='')
-            sys.stdout.flush()
+            self._forth_output.write(chr(code))
+            self._forth_output.flush()
     
     def _key(self):
         try:
-            char = sys.stdin.read(1)
+            char = self._forth_input.read(1)
             self.stack.append(ord(char) if char else 0)
         except:
             self.stack.append(0)
-    
+
     def _key_question(self):
         try:
-            if sys.platform == 'win32':
+            if self._forth_input is not sys.stdin:
+                # Stream redirigido: comprobar si hay datos disponibles sin bloquear
+                import io
+                if isinstance(self._forth_input, io.StringIO):
+                    pos = self._forth_input.tell()
+                    has_data = bool(self._forth_input.read(1))
+                    self._forth_input.seek(pos)
+                    self.stack.append(-1 if has_data else 0)
+                else:
+                    self.stack.append(-1)
+            elif sys.platform == 'win32':
                 import msvcrt
                 self.stack.append(-1 if msvcrt.kbhit() else 0)
             else:
@@ -87,13 +114,13 @@ class ForthIO:
                 self.stack.append(-1 if readable else 0)
         except:
             self.stack.append(0)
-    
+
     def _accept(self):
         if len(self.stack) >= 2:
             max_len = int(self.stack.pop())
             addr = int(self.stack.pop())
             try:
-                line = input()[:max_len]
+                line = self._forth_input.readline().rstrip('\n')[:max_len]
                 for i, char in enumerate(line):
                     if 0 <= addr + i < self._memory_size:
                         self.memory[addr + i] = ord(char)
@@ -113,8 +140,8 @@ class ForthIO:
 
         if isinstance(self.stack[-1], str):
             string = self.stack.pop()
-            print(string, end='')
-            sys.stdout.flush()
+            self._forth_output.write(string)
+            self._forth_output.flush()
             return
 
         if len(self.stack) >= 2:
@@ -131,20 +158,21 @@ class ForthIO:
                     val = self.memory[addr + i]
                     if isinstance(val, int) and 0 < val < 128:
                         chars.append(chr(val))
-            print(''.join(chars), end='')
-            sys.stdout.flush()
-    
+            self._forth_output.write(''.join(chars))
+            self._forth_output.flush()
+
     def _cr(self):
-        print()
-    
+        self._forth_output.write('\n')
+        self._forth_output.flush()
+
     def _page(self):
         from .core import clear_screen
         clear_screen()
         sys.stdout.flush()
-    
+
     def _space(self):
-        print(' ', end='')
-        sys.stdout.flush()
+        self._forth_output.write(' ')
+        self._forth_output.flush()
     
     def _bl(self):
         self.stack.append(32)
@@ -248,7 +276,61 @@ class ForthIO:
     
     def _pwd(self):
         print(os.getcwd())
-    
+
+    def _dir(self):
+        """DIR ( -- ) o ( path -- )  Lista el directorio actual o el indicado"""
+        if self.stack and isinstance(self.stack[-1], str):
+            path = os.path.expanduser(self.stack.pop())
+        else:
+            path = os.getcwd()
+
+        try:
+            entries = sorted(os.listdir(path))
+        except Exception as e:
+            print(f"Error DIR: {e}")
+            return
+
+        dirs  = [e for e in entries if os.path.isdir(os.path.join(path, e))]
+        files = [e for e in entries if not os.path.isdir(os.path.join(path, e))]
+
+        print(f"  {path}")
+        print(f"  {'─' * min(len(path), 60)}")
+        for d in dirs:
+            print(f"  [{d}]")
+        for f in files:
+            try:
+                size = os.path.getsize(os.path.join(path, f))
+                if size >= 1_048_576:
+                    sz = f"{size/1_048_576:.1f} MB"
+                elif size >= 1024:
+                    sz = f"{size/1024:.1f} KB"
+                else:
+                    sz = f"{size} B"
+            except Exception:
+                sz = "?"
+            print(f"  {f:<40} {sz:>9}")
+        total = len(dirs) + len(files)
+        print(f"  {'─' * 50}")
+        print(f"  {len(dirs)} carpetas, {len(files)} ficheros  ({total} entradas)")
+
+    def _cd(self):
+        """CD ( path -- )  Cambia el directorio actual"""
+        if not self.stack or not isinstance(self.stack[-1], str):
+            print(f"Directorio actual: {os.getcwd()}")
+            print("Uso: s\" ruta\" cd")
+            return
+
+        path = os.path.expanduser(self.stack.pop())
+        try:
+            os.chdir(path)
+            print(f"  -> {os.getcwd()}")
+        except FileNotFoundError:
+            print(f"Error CD: directorio no encontrado — '{path}'")
+        except NotADirectoryError:
+            print(f"Error CD: no es un directorio — '{path}'")
+        except PermissionError:
+            print(f"Error CD: sin permiso — '{path}'")
+
     def _to_str(self):
         """( n -- str ) Convierte numero a string"""
         if self.stack:
@@ -718,3 +800,78 @@ class ForthIO:
             self.stack.append(0)
         except:
             self.stack.append(-1)
+
+    def _output_to(self):
+        """Redirige la salida Forth al objeto Python en la cima de la pila.
+        El objeto debe tener un método write(str) y flush().
+        El REPL (prompts, errores) sigue en la consola."""
+        if not self.stack:
+            print("Error: output-to requiere un objeto en la pila")
+            return
+        obj = self.stack.pop()
+        if not hasattr(obj, 'write'):
+            print("Error: output-to — el objeto no tiene método write()")
+            return
+        self._string_buffer = None
+        self._forth_output = obj
+
+    def _output_to_console(self):
+        """Restaura la salida Forth a la consola."""
+        self._forth_output = sys.stdout
+        self._string_buffer = None
+
+    def _output_to_string(self):
+        """Captura toda la salida Forth en un buffer interno.
+        Usar output-get-string para recuperar el texto."""
+        import io
+        self._string_buffer = io.StringIO()
+        self._forth_output = self._string_buffer
+
+    def _output_get_string(self):
+        """Recupera el texto capturado y restaura la salida a la consola.
+        ( -- str )"""
+        if self._string_buffer is not None:
+            result = self._string_buffer.getvalue()
+            self._forth_output = sys.stdout
+            self._string_buffer = None
+        else:
+            result = ''
+        self.stack.append(result)
+
+    def _input_from_string(self):
+        """Redirige el input Forth a un string. Las siguientes llamadas a
+        key, key? y accept leerán de ese string. El REPL sigue en el teclado.
+        ( str -- )"""
+        import io
+        if not self.stack:
+            print("Error: input-from-string requiere un string en la pila")
+            return
+        text = str(self.stack.pop())
+        self._forth_input = io.StringIO(text)
+
+    def _input_from_console(self):
+        """Restaura el input Forth al teclado original."""
+        self._forth_input = self._original_stdin
+
+    def _input_to(self):
+        """Redirige el input Forth a cualquier objeto Python con read().
+        ( obj -- )"""
+        if not self.stack:
+            print("Error: input-to requiere un objeto en la pila")
+            return
+        obj = self.stack.pop()
+        if not hasattr(obj, 'read'):
+            print("Error: input-to — el objeto no tiene método read()")
+            return
+        self._forth_input = obj
+
+    def _output_stream_query(self):
+        """Devuelve el objeto stream de salida Forth actual.
+        ( -- obj )"""
+        self.stack.append(self._forth_output)
+
+    def _input_stream_query(self):
+        """Devuelve el objeto stream de entrada Forth actual.
+        ( -- obj )"""
+        self.stack.append(self._forth_input)
+

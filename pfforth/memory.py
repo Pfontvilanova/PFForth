@@ -411,3 +411,4 @@ class ForthMemory:
         address = self.stack.pop()
         string = self._load_string(address)
         self.stack.append(string)
+

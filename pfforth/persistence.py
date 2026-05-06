@@ -36,7 +36,7 @@ class ForthPersistence:
         """Register persistence words"""
         self.words['save'] = self._save_words
         self.words['load'] = self._load_file
-        self.words['lssave'] = self._lssave
+        self.words['lsforth'] = self._lssave
         self.words['rmsave'] = self._rmsave_stub
         
         self.words['code'] = self._code_stub
@@ -46,7 +46,8 @@ class ForthPersistence:
         self.words['vlist'] = self._vlist
         self.words['rmcode'] = self._rmcode_stub
         self.words['seecode'] = self._seecode_stub
-        self.words['edit'] = self._edit_file
+        self.words['seeforth'] = self._seeforth_stub
+        self.words['editor'] = self._edit_file
     
     def _save_words(self):
         """Save user definitions to a file"""
@@ -255,6 +256,9 @@ class ForthPersistence:
     
     def _seecode_stub(self):
         print("Error: SEECODE requiere nombre (grupo/nombre)")
+
+    def _seeforth_stub(self):
+        print("Error: SEEFORTH requiere nombre de archivo (ej: seeforth demos/graficos)")
     
     def _rmcode(self, import_name):
         """Delete a CODE word file (.py only)"""
@@ -354,7 +358,43 @@ class ForthPersistence:
             
         except Exception as e:
             print(f"Error leyendo {import_name}: {e}")
-    
+
+    def _seeforth(self, filename):
+        """Display the content of a .fth file"""
+        if not filename.endswith('.fth'):
+            filename += '.fth'
+
+        search_paths = [
+            filename,
+            os.path.join(self._base_dir, 'extended-code', filename),
+            os.path.join(self._base_dir, 'extended-code', 'demos', os.path.basename(filename)),
+            os.path.join(self._base_dir, 'extended-code', 'forth', os.path.basename(filename)),
+        ]
+
+        found_path = None
+        for path in search_paths:
+            if os.path.exists(path):
+                found_path = path
+                break
+
+        if not found_path:
+            print(f"Error: archivo no encontrado: {filename}")
+            print(f"  Buscado en: {', '.join(search_paths)}")
+            return
+
+        try:
+            with open(found_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+
+            display_name = os.path.relpath(found_path, self._base_dir)
+            print(f"\n=== FORTH: {display_name} ({len(lines)} líneas) ===\n")
+            for i, line in enumerate(lines, 1):
+                print(f"{i:4d}  {line}", end='')
+            print(f"\n=== FIN ===\n")
+
+        except Exception as e:
+            print(f"Error leyendo {filename}: {e}")
+
     def _create_code_word(self, full_name, code_text):
         """Create a CODE word from Python code"""
         try:
@@ -457,14 +497,34 @@ def execute(forth):
             print(f"Advertencia: no se pudo guardar: {e}")
     
     def _import_code_word(self, full_name):
-        """Import a CODE word from file (.py)"""
+        """Import a CODE word from file (.py) or all words from a directory"""
+        full_name = full_name.rstrip('/')
+        base_dir = os.path.join(self._base_dir, 'extended-code')
+        dir_path = os.path.join(base_dir, full_name)
+
+        if os.path.isdir(dir_path):
+            py_files = sorted(f for f in os.listdir(dir_path) if f.endswith('.py') and not f.startswith('_'))
+            if not py_files:
+                print(f"Error: no hay palabras en {full_name}/")
+                return
+            count = 0
+            for py_file in py_files:
+                name = py_file[:-3]
+                self._import_single_code_word(full_name + '/' + name, base_dir)
+                count += 1
+            print(f"  ({count} palabras de {full_name}/)")
+            return
+
+        self._import_single_code_word(full_name, base_dir)
+
+    def _import_single_code_word(self, full_name, base_dir):
+        """Import a single CODE word from file (.py)"""
         try:
             parts = full_name.split('/')
             word_name = parts[-1]
-            
-            base_dir = os.path.join(self._base_dir, 'extended-code')
+
             file_path = os.path.join(base_dir, full_name + '.py')
-            
+
             if not os.path.exists(file_path):
                 print(f"Error: no existe {full_name}")
                 return
@@ -491,16 +551,16 @@ def execute(forth):
             print(f"Error importando: {e}")
 
     def _edit_file(self):
-        """( str -- ) Abre un archivo para editar con el editor del sistema"""
+        """( str -- ) Abre un archivo para editar con el editor del sistema (palabra: editor)"""
         if not self.stack:
-            print("Error: edit requiere nombre de archivo")
-            print("Uso: s\" nombre\" edit")
+            print("Error: editor requiere nombre de archivo")
+            print("Uso: s\" nombre\" editor")
             print("  Busca en: extended-code/code/*.py y extended-code/forth/*.fth")
             return
 
         name = self.stack.pop()
         if not isinstance(name, str):
-            print("Error: edit requiere un string")
+            print("Error: editor requiere un string")
             return
 
         file_path = self._find_editable_file(name)
@@ -633,8 +693,8 @@ def execute(forth):
         lines = [l.rstrip('\n') for l in lines]
 
         print("\n=== Mini Editor ===")
-        print("Comandos: [numero] edita linea, +[texto] añade linea")
-        print("  d[numero] borra linea, i[numero] inserta antes")
+        print("Comandos: [numero] reemplaza linea, e[numero] edita en sitio")
+        print("  +[texto] añade linea, d[numero] borra, i[numero] inserta antes")
         print("  l lista, s guarda, q sale, sq guarda y sale")
         print()
         self._show_lines(lines)
@@ -684,6 +744,18 @@ def execute(forth):
                         print(f"Posicion {n} fuera de rango (1-{len(lines) + 1})")
                 except ValueError:
                     print("Uso: i[numero]  Ej: i3")
+            elif cmd.startswith('e'):
+                try:
+                    n = int(cmd[1:])
+                    if 1 <= n <= len(lines):
+                        new_text = self._input_prefilled(
+                            f"  {n:4}: ", lines[n - 1])
+                        lines[n - 1] = new_text
+                        self._show_lines(lines)
+                    else:
+                        print(f"Linea {n} fuera de rango (1-{len(lines)})")
+                except ValueError:
+                    print("Uso: e[numero]  Ej: e3")
             else:
                 try:
                     n = int(cmd)
@@ -711,3 +783,29 @@ def execute(forth):
         with open(file_path, 'w') as f:
             for line in lines:
                 f.write(line + '\n')
+
+    def _input_prefilled(self, prompt, prefill):
+        """Input con el texto actual pre-cargado para edición en sitio.
+        Limpia la pantalla y posiciona el cursor en la fila 1 para que
+        el texto a editar quede siempre por encima del teclado virtual en iPad.
+        Usa readline.set_pre_input_hook cuando está disponible (Mac/Linux/a-Shell).
+        Fallback: muestra el texto actual y permite escribir la versión nueva."""
+        sys.stdout.write('\x1b[2J\x1b[H')
+        sys.stdout.flush()
+        print("  [ Enter confirma · Ctrl+C cancela ]")
+        print()
+
+        try:
+            import readline
+            def hook():
+                readline.insert_text(prefill)
+                readline.redisplay()
+            readline.set_pre_input_hook(hook)
+            try:
+                return input(prompt)
+            finally:
+                readline.set_pre_input_hook(None)
+        except (ImportError, AttributeError):
+            print(f"{prompt}{prefill}")
+            result = input(f"  editar: ")
+            return result if result.strip() != '' else prefill

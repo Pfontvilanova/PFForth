@@ -140,25 +140,22 @@ class ForthStack:
             base = self.variables.get('base', 10)
             try:
                 if isinstance(value, float) and value != int(value):
-                    print(value, end=' ')
-                    sys.stdout.flush()
-                    return
-                int_value = int(value)
+                    out = str(value) + ' '
+                else:
+                    int_value = int(value)
+                    if base == 16:
+                        out = format(int_value, 'x') + ' '
+                    elif base == 2:
+                        out = format(int_value, 'b') + ' '
+                    elif base == 8:
+                        out = format(int_value, 'o') + ' '
+                    else:
+                        out = str(int_value) + ' '
             except (ValueError, TypeError):
-                print(value, end=' ')
-                sys.stdout.flush()
-                return
-            
-            if base == 16:
-                print(format(int_value, 'x'), end=' ')
-            elif base == 2:
-                print(format(int_value, 'b'), end=' ')
-            elif base == 8:
-                print(format(int_value, 'o'), end=' ')
-            else:
-                print(int_value, end=' ')
-            sys.stdout.flush()
-    
+                out = str(value) + ' '
+            self._forth_output.write(out)
+            self._forth_output.flush()
+
     def _dot_r(self):
         if len(self.stack) >= 2:
             width = int(self.stack.pop())
@@ -166,22 +163,18 @@ class ForthStack:
             base = self.variables.get('base', 10)
             try:
                 int_value = int(n)
+                if base == 16:
+                    num_str = format(int_value, 'x')
+                elif base == 2:
+                    num_str = format(int_value, 'b')
+                elif base == 8:
+                    num_str = format(int_value, 'o')
+                else:
+                    num_str = str(int_value)
             except (ValueError, TypeError):
-                print(str(n).rjust(width), end=' ')
-                sys.stdout.flush()
-                return
-            
-            if base == 16:
-                num_str = format(int_value, 'x')
-            elif base == 2:
-                num_str = format(int_value, 'b')
-            elif base == 8:
-                num_str = format(int_value, 'o')
-            else:
-                num_str = str(int_value)
-            
-            print(num_str.rjust(width), end=' ')
-            sys.stdout.flush()
+                num_str = str(n)
+            self._forth_output.write(num_str.rjust(width) + ' ')
+            self._forth_output.flush()
     
     def _format_value(self, item, base):
         """Format a value for display, preserving floats"""

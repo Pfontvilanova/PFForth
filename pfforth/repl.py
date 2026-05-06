@@ -14,17 +14,18 @@ from .compiler import ForthCompiler
 from .io_words import ForthIO
 from .persistence import ForthPersistence
 from .optimizations import ForthOptimizations
+from .actors import ForthActors
 
 
-class Forth(ForthBase, ForthArithmetic, ForthStack, ForthMemory, 
-            ForthControlFlow, ForthCompiler, ForthIO, ForthPersistence, 
-            ForthOptimizations):
+class Forth(ForthBase, ForthArithmetic, ForthStack, ForthMemory,
+            ForthControlFlow, ForthCompiler, ForthIO, ForthPersistence,
+            ForthOptimizations, ForthActors):
     """Complete Forth interpreter combining all mixins"""
-    
+
     def __init__(self):
         super().__init__()
         self._register_all_words()
-    
+
     def _register_all_words(self):
         """Register all words from all mixins"""
         self._register_arithmetic_words()
@@ -35,6 +36,7 @@ class Forth(ForthBase, ForthArithmetic, ForthStack, ForthMemory,
         self._register_io_words()
         self._register_persistence_words()
         self._register_optimization_words()
+        self._register_actor_words()
         self.words['help'] = self._help
         self.words['replit-mode'] = self._set_replit_mode
         self.words['standard-mode'] = self._set_standard_mode
@@ -48,9 +50,14 @@ class Forth(ForthBase, ForthArithmetic, ForthStack, ForthMemory,
     
     def _execute_tokens(self, tokens):
         """Execute a list of tokens"""
+        # Save outer state so nested execute() calls (e.g. from 'load') do not
+        # corrupt the outer loop's index tracking.
+        saved_input_tokens = getattr(self, '_input_tokens', None)
+        saved_input_index  = getattr(self, '_input_index', 0)
+
         self._input_tokens = tokens
         self._input_index = 0
-        
+
         i = 0
         while i < len(tokens):
             if self._exit_flag:
@@ -72,7 +79,8 @@ class Forth(ForthBase, ForthArithmetic, ForthStack, ForthMemory,
                         self._current_definition.append(token)
                         self._current_source.append(f'." {token[1]}"')
                     else:
-                        print(token[1], end='')
+                        self._forth_output.write(token[1])
+                        self._forth_output.flush()
                 elif token[0] == 'literal':
                     self.stack.append(token[1])
                 elif token[0] == 'cached':
@@ -258,6 +266,7 @@ class Forth(ForthBase, ForthArithmetic, ForthStack, ForthMemory,
                     self._definition_order.append(('variable', name))
                     i += 2
                     continue
+
             
             if token == 'constant':
                 if self.stack and i + 1 < len(tokens):
@@ -330,6 +339,16 @@ class Forth(ForthBase, ForthArithmetic, ForthStack, ForthMemory,
                 if i + 1 < len(tokens):
                     self._see_word(tokens[i + 1])
                     i += 2
+                    continue
+            
+            if token == 'edit':
+                if i + 1 < len(tokens):
+                    self._edit_word(tokens[i + 1])
+                    i += 2
+                    continue
+                else:
+                    print("Error: edit requiere un nombre de palabra")
+                    i += 1
                     continue
             
             if token == 'measure':
@@ -411,6 +430,12 @@ class Forth(ForthBase, ForthArithmetic, ForthStack, ForthMemory,
                     self._seecode(tokens[i + 1])
                     i += 2
                     continue
+
+            if token == 'seeforth':
+                if i + 1 < len(tokens):
+                    self._seeforth(tokens[i + 1])
+                    i += 2
+                    continue
             
             old_index = self._input_index
             if token in self.words:
@@ -438,7 +463,11 @@ class Forth(ForthBase, ForthArithmetic, ForthStack, ForthMemory,
                 i = self._input_index + 1
             else:
                 i += 1
-    
+
+        # Restore outer execution state after nested execute() completes
+        self._input_tokens = saved_input_tokens
+        self._input_index  = saved_input_index
+
     def _handle_immediate_during_compile(self, token, tokens, i):
         """Handle immediate words during compilation"""
         if token == 'if':
@@ -637,7 +666,8 @@ class Forth(ForthBase, ForthArithmetic, ForthStack, ForthMemory,
                 elif op == 'string':
                     self.stack.append(token[1])
                 elif op == 'print_string':
-                    print(token[1], end='')
+                    self._forth_output.write(token[1])
+                    self._forth_output.flush()
                 elif op == 'py_eval':
                     self._execute_py_eval(token[1])
                 elif op == 'py_exec':
@@ -1077,6 +1107,8 @@ class ForthREPL:
             print("(Modo readline activado)")
         else:
             get_input = input
+        
+        self._repl_input_fn = get_input
         
         if replit_mode:
             print("(Modo Replit - usa 'standard-mode' para desactivar)")
@@ -1717,7 +1749,8 @@ class InteractiveForth(Forth, ForthREPL):
         """Execute Python code block"""
         if not hasattr(self, 'shared'):
             self.shared = {}
-        code = code.strip()
+        import textwrap
+        code = textwrap.dedent(code.strip('\n')).strip()
         env = {
             'f': self,
             'forth': self,
@@ -1769,7 +1802,7 @@ class InteractiveForth(Forth, ForthREPL):
         print("    file-position reposition-file file-size file-exists?")
         print("\n  Sistema: words see help measure forget bye abort")
         print("  Optimizacion: cache-on cache-off cache?")
-        print("  Persistencia: save load lssave code endcode import lscode")
+        print("  Persistencia: save load lsforth code endcode import lscode")
         print("\n" + "=" * 70)
         print("Usa 'words' para ver todas las palabras disponibles")
         print("=" * 70)
