@@ -15,7 +15,7 @@ A second way is: from terminal
 
 python main.py
 
-appears >>> on screen. is python way, you van use python interactive mode, and if you want the repl mode 
+appears >>> on screen. is python way, you can use python interactive mode, and if you want the repl mode 
 you need also write:
 
 f.repl()
