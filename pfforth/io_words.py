@@ -15,6 +15,9 @@ class ForthIO:
         self.words['emit'] = self._emit
         self.words['key'] = self._key
         self.words['key?'] = self._key_question
+        self.words['key-ios-mode'] = self._key_force_ios
+        self.words['key-mac-mode'] = self._key_force_mac
+        self.words['key-mode?'] = self._key_show_mode
         self.words['accept'] = self._accept
         self.words['type'] = self._type
         self.words['cr'] = self._cr
@@ -87,17 +90,136 @@ class ForthIO:
             self._forth_output.write(chr(code))
             self._forth_output.flush()
     
+    # ------------------------------------------------------------------ #
+    #  Detección de plataforma para key / key?                           #
+    # ------------------------------------------------------------------ #
+
+    def _raw_mode_supported(self):
+        """Devuelve True si el modo raw/cbreak funciona sin romper el PTY.
+        En iOS (a-Shell) el cambio de modo del PTY provoca que el teclado
+        deje de responder — se usa modo línea como fallback seguro."""
+        if not hasattr(self, '_raw_mode_ok'):
+            try:
+                import platform as _pl
+                is_ios = False
+
+                # 1) HOME de a-Shell está dentro del sandbox: /var/mobile/...
+                home = os.environ.get('HOME', '')
+                if '/var/mobile/' in home:
+                    is_ios = True
+
+                # 2) TERM_PROGRAM que a-Shell puede poner
+                if os.environ.get('TERM_PROGRAM', '').lower() in ('a-shell', 'a_shell'):
+                    is_ios = True
+
+                # 3) Machine devuelve modelo de dispositivo iOS (iPhone/iPad)
+                machine = _pl.machine()
+                if any(d in machine for d in ('iPhone', 'iPad', 'iPod')):
+                    is_ios = True
+
+                # 4) Ruta del sistema iOS (puede no ser accesible desde el sandbox,
+                #    pero vale como cuarta salvaguarda)
+                try:
+                    if (os.path.exists('/private/var/mobile') and
+                            not os.path.exists('/Applications')):
+                        is_ios = True
+                except Exception:
+                    pass
+
+                fd_ok = hasattr(sys.stdin, 'fileno') and os.isatty(sys.stdin.fileno())
+                self._raw_mode_ok = fd_ok and not is_ios
+            except Exception:
+                self._raw_mode_ok = False
+        return self._raw_mode_ok
+
+    def _key_force_ios(self):
+        """key-ios-mode — fuerza modo línea (a-Shell/iOS), por si la detección falla."""
+        self._raw_mode_ok = False
+        print("key: modo línea (iOS/a-Shell) activado")
+
+    def _key_force_mac(self):
+        """key-mac-mode — fuerza modo raw (Mac/Linux)."""
+        self._raw_mode_ok = True
+        print("key: modo raw (Mac/Linux) activado")
+
+    def _key_show_mode(self):
+        """key-mode? — muestra qué modo usa key en esta plataforma."""
+        mode = "raw (sin Enter)" if self._raw_mode_supported() else "línea (requiere Enter)"
+        print(f"key mode: {mode}")
+        home = os.environ.get('HOME', '?')
+        print(f"  HOME={home}")
+
+    def _key_line_buf(self):
+        """Lee un carácter del buffer interno. Si está vacío lee una línea
+        completa de stdin (requiere Enter) y carga todos sus caracteres.
+        Modo seguro para plataformas donde el modo raw rompe el PTY."""
+        if not hasattr(self, '_key_buf'):
+            self._key_buf = []
+        if self._key_buf:
+            self.stack.append(self._key_buf.pop(0))
+            return
+        try:
+            line = sys.stdin.readline()
+            chars = [ord(c) for c in line.rstrip('\n\r')]
+            if chars:
+                self.stack.append(chars[0])
+                self._key_buf = chars[1:]
+            else:
+                self.stack.append(13)   # Enter sin texto → CR
+        except Exception:
+            self.stack.append(0)
+
+    # ------------------------------------------------------------------ #
+    #  key  ( -- char )                                                   #
+    # ------------------------------------------------------------------ #
+
     def _key(self):
         try:
-            char = self._forth_input.read(1)
-            self.stack.append(ord(char) if char else 0)
-        except:
+            if self._forth_input is not sys.stdin:
+                # Stream redirigido — carácter a carácter, sin cambios de modo
+                char = self._forth_input.read(1)
+                self.stack.append(ord(char) if char else 0)
+
+            elif sys.platform == 'win32':
+                # Windows: getwch() es raw nativo, sin Enter
+                import msvcrt
+                char = msvcrt.getwch()
+                self.stack.append(ord(char) if char else 0)
+
+            elif self._raw_mode_supported():
+                # Mac / Linux: cbreak temporal, lectura directa del fd
+                import tty, termios
+                fd = sys.stdin.fileno()
+                old = termios.tcgetattr(fd)
+                self._tty_canonical = old
+                self._tty_needs_restore = True
+                ch = b''
+                try:
+                    tty.setcbreak(fd, termios.TCSANOW)
+                    ch = os.read(fd, 1)
+                finally:
+                    try:
+                        termios.tcsetattr(fd, termios.TCSANOW, old)
+                        self._tty_needs_restore = False
+                    except Exception:
+                        pass
+                self.stack.append(ch[0] if ch else 0)
+
+            else:
+                # iOS / a-Shell y otros PTY que no soportan raw sin romperse:
+                # modo línea con buffer interno (requiere Enter tras la tecla)
+                self._key_line_buf()
+
+        except Exception:
             self.stack.append(0)
+
+    # ------------------------------------------------------------------ #
+    #  key?  ( -- flag )                                                  #
+    # ------------------------------------------------------------------ #
 
     def _key_question(self):
         try:
             if self._forth_input is not sys.stdin:
-                # Stream redirigido: comprobar si hay datos disponibles sin bloquear
                 import io
                 if isinstance(self._forth_input, io.StringIO):
                     pos = self._forth_input.tell()
@@ -106,13 +228,29 @@ class ForthIO:
                     self.stack.append(-1 if has_data else 0)
                 else:
                     self.stack.append(-1)
+
             elif sys.platform == 'win32':
                 import msvcrt
                 self.stack.append(-1 if msvcrt.kbhit() else 0)
+
+            elif self._raw_mode_supported():
+                # Mac / Linux: cbreak temporal para que select funcione
+                import tty, termios
+                fd = sys.stdin.fileno()
+                old = termios.tcgetattr(fd)
+                try:
+                    tty.setcbreak(fd, termios.TCSANOW)
+                    readable, _, _ = select.select([sys.stdin], [], [], 0)
+                    self.stack.append(-1 if readable else 0)
+                finally:
+                    termios.tcsetattr(fd, termios.TCSANOW, old)
+
             else:
-                readable, _, _ = select.select([sys.stdin], [], [], 0)
-                self.stack.append(-1 if readable else 0)
-        except:
+                # iOS / a-Shell: si el buffer interno tiene chars, hay datos
+                buf = getattr(self, '_key_buf', [])
+                self.stack.append(-1 if buf else 0)
+
+        except Exception:
             self.stack.append(0)
 
     def _accept(self):

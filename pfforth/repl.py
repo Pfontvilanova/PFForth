@@ -1125,7 +1125,31 @@ class ForthREPL:
                     prompt = "OK> "
                 
                 try:
-                    line = get_input(prompt)
+                    if getattr(self, '_tty_needs_restore', False):
+                        # key() manipuló el terminal (setcbreak).
+                        # Intentamos restaurar los settings canónicos.
+                        try:
+                            import termios
+                            termios.tcsetattr(
+                                sys.stdin.fileno(),
+                                termios.TCSANOW,
+                                self._tty_canonical
+                            )
+                        except Exception:
+                            pass
+                        self._tty_needs_restore = False
+                        # En vez de input() (que usa libedit y puede quedar
+                        # confuso tras el cambio de modo del PTY), usamos
+                        # sys.stdout.write + sys.stdin.readline() que lee
+                        # directamente del fd sin gestión propia del terminal.
+                        sys.stdout.write(prompt)
+                        sys.stdout.flush()
+                        raw = sys.stdin.readline()
+                        if not raw:
+                            raise EOFError
+                        line = raw.rstrip('\n\r')
+                    else:
+                        line = get_input(prompt)
                 except EOFError:
                     break
                 
