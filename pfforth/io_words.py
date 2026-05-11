@@ -6,7 +6,6 @@ import sys
 import os
 import select
 
-
 class ForthIO:
     """Mixin providing I/O operations"""
     
