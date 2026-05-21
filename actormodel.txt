@@ -1,0 +1,278 @@
+Manual del Actor Model — pfforth
+Concepto
+El Actor Model permite ejecutar código Forth de forma concurrente. Cada actor es un mini-intérprete Forth independiente con su propia pila, diccionario y buzón de mensajes. Los actores se comunican sólo mediante mensajes — nunca comparten memoria.
+Fase 1 — Actores básicos
+Crear y lanzar actores
+\ Definir el comportamiento del actor
+: mi-tarea ( -- )
+  begin
+    receive          \ espera un mensaje → deja el valor en la pila
+    . cr             \ lo imprime
+  again ;
+\ Crear el actor (devuelve su id)
+' mi-tarea actor-spawn   value mi-actor
+\ Arrancarlo en su propio hilo
+mi-actor actor-run
+Palabras básicas
+Palabra	            Pila	            Descripción
+actor-spawn	( xt -- actor-id )	Crea actor con comportamiento xt
+actor-run	( actor-id -- )	Arranca el actor en un hilo
+actor-kill	( actor-id -- )	Mata el actor
+actor-send	( value actor-id -- )	Envía un valor al buzón del actor
+receive	( -- value )	Espera el siguiente mensaje (bloqueante)
+receive-timeout	( ms -- value found )	Espera con timeout en milisegundos
+actor-id	( -- id )	Id del actor actual
+actor-alive?	( actor-id -- flag )	-1 si vive, 0 si no
+actor-list	( -- )	Lista todos los actores
+Ejemplo: ping-pong
+: pong-loop ( -- )
+  begin
+    receive          \ recibe valor
+    sender-id        \ id del que mandó
+    actor-send       \ devuelve el mismo valor
+  again ;
+' pong-loop actor-spawn value pong
+pong actor-run
+42 pong actor-send
+receive .   \ imprime 42
+Fase 2 — Mensajería avanzada y supervisión
+Palabras de mensajería
+Palabra	Pila	Descripción
+sender-id	( -- id )	Id del actor que mandó el último mensaje
+reply	( value -- )	Responde al sender del último mensaje
+broadcast	( value -- )	Envía a todos los actores vivos
+actor-wait	( actor-id -- )	Bloquea hasta que el actor termine
+Watchdog (supervisor automático)
+: mi-worker ( -- )
+  begin receive . cr again ;
+' mi-worker actor-spawn value wk
+wk actor-run
+\ Watchdog: reinicia si muere, máximo 5 reinicios
+wk 5 actor-watchdog value guardian
+guardian actor-run
+Logger centralizado
+\ Arrancar el actor logger (guarda en actor-log-id)
+actor-log-start
+\ Usar desde cualquier actor
+s" Todo correcto" log-info
+s" Atención: pila vacía" log-warn
+s" Error de red" log-error
+Fase 3 — Comunicación distribuida
+Concepto
+Con Fase 3 los actores pueden vivir en nodos distintos (Mac, Raspberry Pi, ESP32). actor-send detecta automáticamente si el destino es local o remoto y enruta el mensaje por WiFi (MQTT o TCP), UART o SPI.
+Transportes disponibles
+Actor de transporte.    	Pila	         Protocolo
+actor-wifi-out	( host port topic -- id )	MQTT (paho-mqtt)
+actor-wifi-tcp-out	( host port -- id )	TCP/IP
+actor-uart-out	( device baud -- id )	UART serie (pyserial)
+actor-spi-out	( device speed -- id )	SPI (spidev, Linux)
+actor-wifi-in	( host port topic -- id )	MQTT listener
+actor-wifi-tcp-in	( port -- id )	TCP server
+actor-uart-in	( device baud -- id )	UART listener
+actor-spi-in	( device speed -- id )	SPI listener
+Tabla de rutas
+\ Registrar manualmente una ruta
+actor-wifi-out s" broker.local" 1883 s" pfforth/rpi/in"   value tx-rpi
+42 s" mqtt" tx-rpi   registrar-ruta
+\ Helpers rápidos (crean el actor OUT y registran la ruta)
+\ actor-id "host" "topic" wifi-canal    → WiFi MQTT
+\ actor-id host:port    tcp-canal       → WiFi TCP
+\ actor-id "/dev/tty" uart-115200       → UART 115200
+\ actor-id "/dev/spi0" spi-500k         → SPI 500 kHz
+Palabra.             	Pila	                      Descripción
+registrar-ruta	( actor-id transport-str ta-id -- )	Asocia actor remoto con actor OUT
+ruta-buscar	( actor-id -- endpoint-str | 0 )	Devuelve descripción o 0 si local
+ruta-del	( actor-id -- )	                     Elimina una ruta
+rutas	            ( -- )	                     Lista la tabla de rutas actual
+wifi-ruta-add	( actor-id host port topic -- )	Atajo: MQTT OUT + registrar
+uart-ruta-add	( actor-id device baud -- ). 	Atajo: UART OUT + registrar
+spi-ruta-add	( actor-id device speed -- )	Atajo: SPI OUT + registrar
+Tiempo sincronizado (NTP)
+\ Sincronizar una vez al arrancar
+0 actor-ntp drop
+\ Resync automático cada 5 minutos
+300000 actor-ntp drop
+\ Leer tiempo UTC en milisegundos (ajustado por NTP)
+actor-time .
+Ejemplo completo: dos nodos locales
+\ Nodo A: envía un valor a un actor en nodo B
+\ En nodo B (Raspberry Pi) hay un actor con id 10 escuchando MQTT
+\ 1. Arrancar transporte hacia nodo B
+s" broker.local" 1883 s" pfforth/rpi/in" actor-wifi-out value tx-rpi
+\ 2. Registrar la ruta
+10 s" mqtt" tx-rpi registrar-ruta
+\ 3. Arrancar el receptor de mensajes que vienen de nodo B
+s" broker.local" 1883 s" pfforth/mac/in" actor-wifi-in drop
+\ 4. Enviar — actor-send es transparente: local o remoto funciona igual
+99 10 actor-send
+Protocolo de transporte
+WiFi (MQTT y TCP) — JSON delimitado por newline:
+{"proto":"pfforth-actor","v":1,"to":10,"from":1,"msg":99}
+UART / SPI — trama binaria:
+[0xAC][0xE0][len_hi][len_lo][json_bytes...]
+Cargar los módulos
+s" actors"           fload   \ Fases 1 y 2
+s" actor-transport"  fload   \ Fase 3 (transportes y rutas)
+Los archivos .fth están en extended-code/forth/.
+Referencia rápida — todas las palabras
+FASE 1: actor-spawn  actor-run  actor-kill  actor-send  receive
+         receive-timeout  actor-id  actor-alive?  actor-list
+FASE 2: sender-id  reply  broadcast  actor-wait
+         actor-watchdog  actor-log-start  log-info  log-warn  log-error
+FASE 3: registrar-ruta  ruta-buscar  ruta-del  rutas
+         wifi-ruta-add  uart-ruta-add  spi-ruta-add
+         actor-wifi-out  actor-wifi-tcp-out  actor-uart-out  actor-spi-out
+         actor-wifi-in   actor-wifi-tcp-in   actor-uart-in   actor-spi-in
+         actor-ntp  actor-time
+
+Actor reactivo (por defecto)
+Espera bloqueado hasta que alguien le envíe un mensaje. No hace nada por su cuenta.
+
+: mi-reactivo ( -- )
+  begin
+    receive        \ duerme aquí hasta recibir algo
+    . cr
+  again ;
+' mi-reactivo actor-spawn value r
+r actor-run
+El actor no consume CPU mientras espera. Solo "despierta" cuando llega un mensaje.
+
+Actor proactivo
+Recibe un 'tick automático cada N milisegundos, sin que nadie se lo mande. Actúa por su propio reloj interno.
+
+: mi-proactivo ( -- )
+  begin
+    receive drop   \ el tick llega solo — descartamos el valor
+    ." tick!" cr
+  again ;
+' mi-proactivo actor-spawn value p
+500 ms p proactive   \ tick cada 500 ms
+p actor-run
+La palabra proactive configura el intervalo y arranca el temporizador interno.
+
+Resumen
+
+Reactivo	                                      Proactivo
+Se activa cuando...	alguien hace actor-send	  pasa el tiempo del intervalo
+Consume CPU en espera	no	                  no (el timer es interno)
+Puede también recibir mensajes	sí	          sí
+Configuración extra	ninguna	                  interval-ms actor-id proactive
+Un actor proactivo también puede recibir mensajes normales — el 'tick es simplemente un mensaje periódico automático que se mezcla con los demás en su buzón.
+
+La diferencia con FlashForth es conceptual: en lugar de leer una variable compartida, preguntas al actor y él te responde. El actor es el único dueño de su estado — nadie más lo toca.
+
+Para probar sin esperar minutos reales puedes usar segundos:
+
+: segundos-loop ( -- )
+  0
+  begin
+    1000 receive-timeout
+    if drop dup reply
+    else 1 +
+    then
+  again ;
+' segundos-loop actor-spawn value S-actor
+S-actor actor-run
+\ Espera unos segundos y pregunta:
+0 S-actor actor-send
+receive .
+
+Perfecto, ya entiendo cómo funciona. Los vectores se guardan como listas Python en forth.vectors. Cuando haces V1 v@ pone la lista Python en el stack — y esa lista se puede enviar directamente con actor-send sin ningún problema.
+
+Aquí el patrón completo:
+
+Actor productor — crea y envía el vector:
+
+\ Crear el vector local
+s" temps" vector:
+[22.1 22.3 21.9 23.0 22.8 21.5 22.7 23.1 22.4 21.8] temps v!
+: sensor-loop ( -- )
+  begin
+    60000 receive-timeout
+    if
+      drop
+      temps v@          \ pone la lista Python en el stack
+      reply             \ la envía al que preguntó
+    else
+      \ ... actualizar lecturas cada minuto
+    then
+  again ;
+Actor o REPL receptor — recibe y usa el vector:
+
+\ Pedir los datos
+0 sensor actor-send
+receive                 \ llega la lista Python directamente
+\ Guardarla en un vector propio y trabajar con ella
+s" mis-temps" vector:
+mis-temps v!
+\ Ahora puedes usar todas las palabras del módulo math
+mis-temps v@  vlen .         \ cuántos elementos
+mis-temps v@  v.             \ imprimir el vector
+Para matrices igual:
+
+\ Productor envía una matriz
+M1 m@  reply
+\ Receptor la recibe y la guarda
+s" mi-mat" matrix:
+receive mi-mat m!
+mi-mat m@  mlen .
+La clave es que v@ / m@ sacan el objeto Python del stack, actor-send lo transporta intacto, y el receptor lo mete en su propio forth.vectors con v!. El contenido no se copia — llega por referencia, así que es muy eficiente incluso con matrices grandes.
+
+Exacto, ese es el patrón más limpio. Como el REPL es el actor 0, cualquier actor puede enviarle datos y el REPL los guarda en su propio espacio:
+
+\ Desde dentro de un actor: enviar resultado al REPL (actor 0)
+mis-datos v@  0 actor-send
+Y en el REPL cuando quieras recoger el dato:
+
+s" resultado" vector:
+receive resultado v!    \ guarda en la memoria del REPL
+resultado v@  v.        \ ya puedes trabajar con él
+O si quieres que el actor envíe automáticamente cada minuto sin que el REPL tenga que preguntar:
+
+: sensor-loop ( -- )
+  s" lectura" vector:
+  begin
+    60000 ms-sleep       \ espera 1 minuto
+    leer-20-temps        \ produce el vector
+    0 actor-send         \ lo manda al REPL (actor 0)
+  again ;
+Y en el REPL, en cualquier momento:
+
+receive resultado v!    \ recoge el último envío del sensor
+Es exactamente el equivalente al buffer compartido de FlashForth, pero usando el buzón del actor 0 como canal de entrega.
+
+Igual que en el REPL, pero con un detalle importante: la creación va antes del bucle, no dentro, para que solo se ejecute una vez al arrancar el actor:
+
+: sensor-actor ( -- )
+  \ Inicialización — se ejecuta solo al arrancar
+  s" temps" vector:
+  s" medias" vector:
+  0 variable ciclos
+  \ Bucle principal
+  begin
+    60000 receive-timeout
+    if
+      \ Recibió consulta → responde con el vector actual
+      drop
+      temps v@  reply
+    else
+      \ Pasó 1 minuto → leer y guardar nuevas temperaturas
+      1 ciclos +!
+      leer-20-temps    \ palabra que produce el vector
+      temps v!
+    then
+  again ;
+' sensor-actor actor-spawn value sensor
+sensor actor-run
+Si el vector viene de fuera (lo recibes como mensaje y lo guardas):
+
+: almacen-actor ( -- )
+  s" cache" vector:
+  begin
+    receive          \ recibe un vector de otro actor
+    cache v!         \ lo guarda en su propio espacio
+    cache v@  vlen . \ imprime cuántos elementos tiene
+  again ;
+El punto clave es que forth.vectors es propio de cada actor — el actor crea y gestiona sus vectores de forma completamente independiente, igual que el REPL tiene los suyos.
+Si no quieres imprimir en el terminal general, puedes hacer vlen @ repl actor-send y liego cuando quieras imprimirlo desde repl con receive .
+
