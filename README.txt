@@ -1,7 +1,7 @@
 Pfforth language is a forth with python primitives. you need to see the wiki tab for a user 
 manual. you can run it in every device with python an at less 1MB of memory for the core, 
 better more than 5 MB if you want to install all extensions. To run it you must download the 
-folders and the files to your computer. then run python.
+folders and the files to your computer. then run python. Actors model protocol is included.
 
 from pfforth import InteractiveForth
 f = InteractiveForth()
