@@ -185,7 +185,12 @@ class ForthActors:
         if not hasattr(ForthActors, '_route_table'):
             ForthActors._route_table    = {}   # {actor_id: route_dict}
             ForthActors._route_lock     = threading.Lock()
+            ForthActors._actor_bindings = {}   # logical network id -> local id
             ForthActors._ntp_offset     = 0.0  # seconds to add to time.time()
+        if not hasattr(ForthActors, '_mqtt_actor_config'):
+            ForthActors._mqtt_actor_config = {'user': '', 'password': '', 'tls': False}
+        if not hasattr(ForthActors, '_mqtt_debug'):
+            ForthActors._mqtt_debug = False
 
         # Per-instance actor state (None = not an actor / REPL)
         if not hasattr(self, '_actor_queue'):
@@ -225,10 +230,16 @@ class ForthActors:
         self.words['ruta-buscar']         = self._ruta_buscar
         self.words['ruta-del']            = self._ruta_del
         self.words['rutas']               = self._rutas
+        self.words['actor-bind']          = self._actor_bind
+        self.words['actor-unbind']        = self._actor_unbind
+        self.words['actor-bindings']      = self._actor_list_bindings
         # Convenience wrappers (auto-start transport actor + register route)
         self.words['wifi-ruta-add']       = self._wifi_ruta_add
+        self.words['actor-mqtt-config']   = self._actor_mqtt_config
+        self.words['actor-mqtt-debug']    = self._actor_mqtt_debug
         self.words['uart-ruta-add']       = self._uart_ruta_add
         self.words['spi-ruta-add']        = self._spi_ruta_add
+        self.words['tcp-ruta-add']        = self._tcp_ruta_add
         # Outgoing transport actors
         self.words['actor-wifi-out']      = self._actor_wifi_out
         self.words['actor-wifi-tcp-out']  = self._actor_wifi_tcp_out
@@ -246,8 +257,13 @@ class ForthActors:
     # ── Time helpers ───────────────────────────────────────────────────
 
     def _ms(self):
-        """( n -- n ) n is already milliseconds — readability word."""
-        pass
+        """( milliseconds -- ) Pause execution for the requested duration."""
+        if not self.stack:
+            raise IndexError("ms requiere milisegundos en la pila")
+        milliseconds = self.stack.pop()
+        if not isinstance(milliseconds, (int, float)) or milliseconds < 0:
+            raise ValueError("ms requiere un número de milisegundos no negativo")
+        time.sleep(milliseconds / 1000)
 
     def _s_to_ms(self):
         """( n -- n*1000 ) Convert seconds to milliseconds."""
@@ -349,6 +365,79 @@ class ForthActors:
         child.words['sender-id']       = lambda: child.stack.append(child._last_sender_id)
         child.words['reply']           = lambda: _reply_in(child)
 
+        # Vocabulary and extended-code words are often not recorded in
+        # _definition_order.  Bind them to the child through a temporary
+        # stack swap, rather than leaving a closure pointing at the parent.
+        parent = self
+
+        def _make_parent_wrapper(fn):
+            def _wrapper():
+                parent.stack, child.stack = child.stack, parent.stack
+                parent.rstack, child.rstack = child.rstack, parent.rstack
+                parent._locals_stack, child._locals_stack = (
+                    child._locals_stack, parent._locals_stack)
+                try:
+                    fn()
+                finally:
+                    parent.stack, child.stack = child.stack, parent.stack
+                    parent.rstack, child.rstack = child.rstack, parent.rstack
+                    parent._locals_stack, child._locals_stack = (
+                        child._locals_stack, parent._locals_stack)
+            return _wrapper
+
+        def _make_child_code_wrapper(spec):
+            kind, payload = spec
+            if kind == 'module':
+                return lambda module=payload: module.execute(child)
+
+            compiled_code = payload
+
+            def push(value):
+                child.stack.append(value)
+
+            def pop():
+                if not child.stack:
+                    raise IndexError("Stack underflow")
+                return child.stack.pop()
+
+            def peek():
+                if not child.stack:
+                    raise IndexError("Stack empty")
+                return child.stack[-1]
+
+            import math
+            namespace = {
+                'self': child,
+                'push': push,
+                'pop': pop,
+                'peek': peek,
+                'math': math,
+            }
+
+            def execute_inline():
+                try:
+                    exec(compiled_code, namespace)
+                except Exception as exc:
+                    print(f"Error: {exc}")
+
+            return execute_inline
+
+        # Install these before recompiling user definitions so the compiler
+        # resolves cached vocabulary/extended words against the child.
+        # Imported CODE words can appear in _definition_order but cannot be
+        # reconstructed from Forth source.  Install their wrappers before
+        # recompiling words which reference them.
+        defined_names = set(
+            name for kind, name in self._definition_order
+            if kind != 'code')
+        code_specs = getattr(self, '_code_word_specs', {})
+        for name, spec in code_specs.items():
+            child.words[name] = _make_child_code_wrapper(spec)
+        for name, fn in self.words.items():
+            if (name not in child.words and name not in defined_names
+                    and name not in code_specs):
+                child.words[name] = _make_parent_wrapper(fn)
+
         # Inherit all user definitions in declaration order.
         # Errors are suppressed; set ACTOR_DEBUG=1 to surface them.
         import os as _os
@@ -385,9 +474,22 @@ class ForthActors:
                         child.constants[name] = val
                         child.words[name] = (lambda _v=val: lambda: child.stack.append(_v))(val)
 
+                elif def_type == 'created':
+                    # CREATE/DOES> actions capture the defining interpreter.
+                    # Keep their data field in the parent's shared memory,
+                    # while giving the action the child's data stack.
+                    fn = self.words.get(name)
+                    if fn is not None:
+                        child.words[name] = _make_parent_wrapper(fn)
+
             except Exception as _e:
                 if _debug:
                     print(f"[actor-spawn] advertencia al heredar {def_type} '{name}': {_e}")
+
+        defined_names = set(name for _kind, name in self._definition_order)
+        for name, fn in self.words.items():
+            if name not in child.words and name not in defined_names:
+                child.words[name] = _make_parent_wrapper(fn)
 
         return child
 
@@ -435,13 +537,15 @@ class ForthActors:
         if len(self.stack) < 2:
             print("Error: actor-send requiere ( valor actor-id -- )")
             return
-        actor_id  = int(self.stack.pop())
+        actor_id  = self.stack.pop()
         value     = self.stack.pop()
-        sender_id = getattr(_actor_local, 'actor_id', 0)
+        sender_local_id = getattr(_actor_local, 'actor_id', 0)
+        sender_id = _logical_sender_id(sender_local_id)
 
         # ── Phase 3: check routing table ───────────────────────────────
         with ForthActors._route_lock:
             route = ForthActors._route_table.get(actor_id)
+            bound_local_id = ForthActors._actor_bindings.get(actor_id, actor_id)
 
         if route:
             ta_id = route['transport_actor_id']
@@ -457,7 +561,7 @@ class ForthActors:
 
         # ── Local delivery ────────────────────────────────────────────
         with ForthActors._registry_lock:
-            entry = ForthActors._registry.get(actor_id)
+            entry = ForthActors._registry.get(bound_local_id)
         if entry:
             entry['queue'].put(_ActorMsg(sender_id, value))
         else:
@@ -506,7 +610,7 @@ class ForthActors:
         if not self.stack:
             print("Error: actor-wait requiere actor-id")
             return
-        actor_id = int(self.stack.pop())
+        actor_id = self.stack.pop()
         with ForthActors._registry_lock:
             entry = ForthActors._registry.get(actor_id)
         if not entry:
@@ -738,7 +842,7 @@ class ForthActors:
         if not self.stack:
             print("Error: actor-kill requiere actor-id")
             return
-        actor_id = int(self.stack.pop())
+        actor_id = self.stack.pop()
 
         with ForthActors._registry_lock:
             entry = ForthActors._registry.pop(actor_id, None)
@@ -823,7 +927,7 @@ class ForthActors:
         if not self.stack:
             self.stack.append(0)
             return
-        actor_id = int(self.stack.pop())
+        actor_id = self.stack.pop()
         with ForthActors._registry_lock:
             entry = ForthActors._registry.get(actor_id)
         self.stack.append(-1 if entry and entry.get('alive') else 0)
@@ -861,7 +965,7 @@ class ForthActors:
         if not self.stack:
             print("Error: reactive requiere actor-id")
             return
-        actor_id = int(self.stack.pop())
+        actor_id = self.stack.pop()
         with ForthActors._registry_lock:
             if actor_id in ForthActors._registry:
                 ForthActors._registry[actor_id]['type'] = 'reactive'
@@ -932,7 +1036,7 @@ class ForthActors:
             return
         transport_actor_id = int(self.stack.pop())
         transport          = str(self.stack.pop())
-        actor_id           = int(self.stack.pop())
+        actor_id           = self.stack.pop()
 
         with ForthActors._registry_lock:
             ta_entry = ForthActors._registry.get(transport_actor_id)
@@ -968,7 +1072,7 @@ class ForthActors:
         if not self.stack:
             print("Error: ruta-buscar requiere actor-id")
             return
-        actor_id = int(self.stack.pop())
+        actor_id = self.stack.pop()
         with ForthActors._route_lock:
             route = ForthActors._route_table.get(actor_id)
         if route:
@@ -994,9 +1098,10 @@ class ForthActors:
         topic    = str(self.stack.pop())
         port     = int(self.stack.pop())
         host     = str(self.stack.pop())
-        actor_id = int(self.stack.pop())
+        actor_id = self.stack.pop()
 
-        key = ('mqtt', host, port, topic)
+        config = ForthActors._mqtt_actor_config
+        key = ('mqtt', host, port, topic, config['user'], config['password'], config['tls'])
         ta_id = _get_or_start_transport_out(self, key,
                     lambda: _start_mqtt_out_actor(self, host, port, topic))
         if not ta_id:
@@ -1009,6 +1114,20 @@ class ForthActors:
             ForthActors._route_table[actor_id] = route
         print(f"Ruta WiFi MQTT: actor-{actor_id} → actor-{ta_id} ({host}:{port}/{topic})")
 
+    def _actor_mqtt_config(self):
+        """( user password tls? -- ) Configure future MQTT transport clients."""
+        if len(self.stack) < 3:
+            print("Error: actor-mqtt-config requiere ( user password tls? -- )")
+            return
+        tls = self.stack.pop()
+        password = self.stack.pop()
+        user = self.stack.pop()
+        if not isinstance(user, str) or not isinstance(password, str) or tls not in (0, 1, False, True):
+            raise ValueError("actor-mqtt-config: credenciales o TLS invalidos")
+        if bool(user) != bool(password):
+            raise ValueError("actor-mqtt-config: usuario y contraseña deben configurarse juntos")
+        ForthActors._mqtt_actor_config = {'user': user, 'password': password, 'tls': bool(tls)}
+
     def _uart_ruta_add(self):
         """( actor-id device baud -- ) Start a UART OUT actor (if needed)
         and register the route for *actor-id*.
@@ -1019,7 +1138,7 @@ class ForthActors:
             return
         baud     = int(self.stack.pop())
         device   = str(self.stack.pop())
-        actor_id = int(self.stack.pop())
+        actor_id = self.stack.pop()
 
         key = ('uart', device, baud)
         ta_id = _get_or_start_transport_out(self, key,
@@ -1047,7 +1166,7 @@ class ForthActors:
             return
         speed    = int(self.stack.pop())
         device   = str(self.stack.pop())
-        actor_id = int(self.stack.pop())
+        actor_id = self.stack.pop()
 
         key = ('spi', device, speed)
         ta_id = _get_or_start_transport_out(self, key,
@@ -1062,18 +1181,77 @@ class ForthActors:
             ForthActors._route_table[actor_id] = route
         print(f"Ruta SPI: actor-{actor_id} → actor-{ta_id} ({device}@{speed}Hz)")
 
+    def _tcp_ruta_add(self):
+        """( logical-id host port -- ) Start/reuse TCP OUT and bind route."""
+        if len(self.stack) < 3:
+            print("Error: tcp-ruta-add requiere ( logical-id host port -- )")
+            return
+        port = int(self.stack.pop())
+        host = str(self.stack.pop())
+        logical_id = self.stack.pop()
+        key = ('tcp', host, port)
+        ta_id = _get_or_start_transport_out(
+            self, key, lambda: _start_tcp_out_actor(self, host, port))
+        if not ta_id:
+            print(f"Error: tcp-ruta-add: transporte TCP no disponible")
+            return
+        route = {
+            'transport': 'tcp',
+            'transport_actor_id': ta_id,
+            'desc': f'{host}:{port}',
+        }
+        with ForthActors._route_lock:
+            ForthActors._route_table[logical_id] = route
+        print(f"Ruta TCP: actor-{logical_id} → actor-{ta_id} ({host}:{port})")
+
     def _ruta_del(self):
         """( actor-id -- ) Remove routing entry for actor-id."""
         if not self.stack:
             print("Error: ruta-del requiere actor-id")
             return
-        actor_id = int(self.stack.pop())
+        actor_id = self.stack.pop()
         with ForthActors._route_lock:
             removed = ForthActors._route_table.pop(actor_id, None)
         if removed:
             print(f"Ruta de actor-{actor_id} eliminada")
         else:
             print(f"actor-{actor_id} no tenía ruta registrada")
+
+    def _actor_bind(self):
+        """( local-actor-id logical-id -- ) Bind a stable network identity.
+
+        Bindings are intentionally explicit: if an actor is stopped and its
+        id is later reused, the binding is not silently retargeted.  Rebind
+        after a restart with this word.
+        """
+        if len(self.stack) < 2:
+            print("Error: actor-bind requiere ( local-actor-id logical-id -- )")
+            return
+        logical_id = self.stack.pop()
+        local_id = int(self.stack.pop())
+        with ForthActors._route_lock:
+            ForthActors._actor_bindings[logical_id] = local_id
+
+    def _actor_unbind(self):
+        """( logical-id -- ) Remove a stable network identity."""
+        if self.stack:
+            logical_id = self.stack.pop()
+            with ForthActors._route_lock:
+                ForthActors._actor_bindings.pop(logical_id, None)
+
+    def _actor_list_bindings(self):
+        """( -- ) Print stable network identities and their local targets."""
+        with ForthActors._route_lock:
+            bindings = list(ForthActors._actor_bindings.items())
+        for logical_id, local_id in bindings:
+            print(f"{logical_id} -> actor-{local_id}")
+
+    def _actor_mqtt_debug(self):
+        """( flag -- ) Enable metadata-only MQTT receive diagnostics."""
+        if not self.stack:
+            print("Error: actor-mqtt-debug requiere ( flag -- )")
+            return
+        ForthActors._mqtt_debug = bool(self.stack.pop())
 
     def _rutas(self):
         """( -- ) Print the current routing table."""
@@ -1196,48 +1374,96 @@ class ForthActors:
 
         stop_evt  = threading.Event()
         in_queue  = queue.Queue()   # internal queue (not used for messaging)
+        mqtt_config = ForthActors._mqtt_actor_config.copy()
+
+        def set_ready(ready):
+            with ForthActors._registry_lock:
+                entry = ForthActors._registry.get(actor_id)
+                if entry:
+                    entry['alive'] = bool(ready and not stop_evt.is_set())
+
+        def on_connect(client, userdata, flags, rc, properties=None):
+            if rc != 0:
+                raise ConnectionError(f"MQTT CONNACK rechazado: {rc}")
+            if stop_evt.is_set():
+                return
+            set_ready(False)
+            print(f"actor-wifi-in: connectat {host}:{port}; esperant SUBACK")
+            result = client.subscribe(topic, qos=1)
+            if result[0] != 0:
+                raise ConnectionError(f"MQTT subscribe fallido: {result[0]}")
+
+        def on_subscribe(client, userdata, mid, granted_qos, properties=None):
+            codes = [getattr(code, 'value', code) for code in granted_qos]
+            if not codes or any(code >= 128 for code in codes):
+                raise ConnectionError(f"MQTT SUBACK rechazado: {codes}")
+            if stop_evt.is_set():
+                return
+            set_ready(True)
+            print(f"actor-wifi-in ({actor_id}): subscrit {host}:{port}/{topic} (SUBACK)")
+
+        def on_disconnect(client, userdata, rc, *extra):
+            set_ready(False)
+            if not stop_evt.is_set():
+                print(f"actor-wifi-in: desconnectat ({rc})")
 
         def on_message(client, userdata, message):
+            debug = ForthActors._mqtt_debug
+            if debug:
+                print(f"MQTT RX: {getattr(message, 'topic', topic)}")
             try:
                 payload = json.loads(message.payload.decode('utf-8'))
             except Exception:
+                if debug:
+                    print("MQTT DROP: JSON no valid")
                 return
-            if payload.get('proto') != 'pfforth-actor':
+            if not _valid_actor_envelope(payload):
+                if debug:
+                    print("MQTT DROP: envelope no valid")
                 return
             to_id   = payload.get('to', 0)
+            logical_id = to_id
             from_id = payload.get('from', 0)
             value   = payload.get('msg')
             with ForthActors._registry_lock:
+                to_id = _resolve_actor_id(to_id)
                 entry = ForthActors._registry.get(to_id)
             if entry:
                 entry['queue'].put(_ActorMsg(from_id, value))
+                if debug:
+                    print(f"MQTT DELIVER: {logical_id} -> actor-{to_id} from={from_id}")
             else:
                 ts = datetime.now().strftime('%H:%M:%S')
                 print(f"[{ts}] actor-wifi-in: actor local {to_id} no encontrado")
 
         def wifi_in_body():
-            client = mqtt.Client()
-            client.on_message = on_message
-            try:
-                client.connect(host, port, keepalive=60)
-                client.subscribe(topic)
-                ts = datetime.now().strftime('%H:%M:%S')
-                print(f"[{ts}] actor-wifi-in ({actor_id}): escuchando {host}:{port}/{topic}")
-                with ForthActors._registry_lock:
-                    if actor_id in ForthActors._registry:
-                        ForthActors._registry[actor_id]['alive'] = True
-                while not stop_evt.is_set():
-                    client.loop(timeout=0.5)
-            except Exception as e:
-                print(f"actor-wifi-in error: {e}")
-            finally:
+            while not stop_evt.is_set():
+                client = None
                 try:
-                    client.disconnect()
-                except Exception:
-                    pass
-                with ForthActors._registry_lock:
-                    if actor_id in ForthActors._registry:
-                        ForthActors._registry[actor_id]['alive'] = False
+                    client = mqtt.Client()
+                    client.on_connect = on_connect
+                    client.on_subscribe = on_subscribe
+                    client.on_disconnect = on_disconnect
+                    client.on_message = on_message
+                    _configure_mqtt_actor_client(client, mqtt_config)
+                    client.connect(host, port, keepalive=60)
+                    while not stop_evt.is_set():
+                        rc = client.loop(timeout=0.5)
+                        if rc not in (None, 0):
+                            raise ConnectionError(f"MQTT loop fallo: {rc}")
+                except Exception as e:
+                    if not stop_evt.is_set():
+                        print(f"actor-wifi-in error: {e}; reintentant")
+                finally:
+                    set_ready(False)
+                    try:
+                        if client is not None:
+                            client.disconnect()
+                    except Exception:
+                        pass
+                # A stopped listener must not sleep or reopen a connection.
+                if not stop_evt.is_set():
+                    stop_evt.wait(2)
 
         thread = threading.Thread(
             target=wifi_in_body,
@@ -1334,12 +1560,13 @@ class ForthActors:
                             payload = json.loads(frame.decode('utf-8'))
                         except Exception:
                             continue
-                        if payload.get('proto') != 'pfforth-actor':
+                        if not _valid_actor_envelope(payload):
                             continue
                         to_id   = payload.get('to', 0)
                         from_id = payload.get('from', 0)
                         value   = payload.get('msg')
                         with ForthActors._registry_lock:
+                            to_id = _resolve_actor_id(to_id)
                             entry = ForthActors._registry.get(to_id)
                         if entry:
                             entry['queue'].put(_ActorMsg(from_id, value))
@@ -1518,12 +1745,13 @@ class ForthActors:
                             payload = json.loads(frame.decode('utf-8'))
                         except Exception:
                             continue
-                        if payload.get('proto') != 'pfforth-actor':
+                        if not _valid_actor_envelope(payload):
                             continue
                         to_id   = payload.get('to', 0)
                         from_id = payload.get('from', 0)
                         value   = payload.get('msg')
                         with ForthActors._registry_lock:
+                            to_id = _resolve_actor_id(to_id)
                             entry = ForthActors._registry.get(to_id)
                         if entry:
                             entry['queue'].put(_ActorMsg(from_id, value))
@@ -1648,6 +1876,40 @@ def _make_actor_envelope(to_id, from_id, value):
     }
 
 
+def _valid_actor_envelope(payload):
+    """Validate the shared TCP envelope (and tolerate old MicroPython peers)."""
+    if not isinstance(payload, dict):
+        return False
+    if payload.get('proto') not in ('pfforth-actor', 'ufforth-actor'):
+        return False
+    if payload.get('v') != 1:
+        return False
+    return 'to' in payload and 'msg' in payload
+
+
+def _resolve_actor_id(actor_id):
+    """Resolve a stable network identity without changing local IDs."""
+    bindings = getattr(ForthActors, '_actor_bindings', {})
+    return bindings.get(actor_id, actor_id)
+
+
+def _logical_sender_id(local_id):
+    """Return a bound logical sender id, or retain the numeric actor id."""
+    bindings = getattr(ForthActors, '_actor_bindings', {})
+    for logical_id, bound_local_id in bindings.items():
+        if bound_local_id == local_id:
+            return logical_id
+    return local_id
+
+
+def _configure_mqtt_actor_client(client, config):
+    """Apply optional credentials and TLS before opening the connection."""
+    if config['user']:
+        client.username_pw_set(config['user'], config['password'])
+    if config['tls']:
+        client.tls_set()
+
+
 def _make_transport_frame(to_id, from_id, value):
     """Return a binary-framed JSON envelope for UART/SPI transport."""
     env     = _make_actor_envelope(to_id, from_id, value)
@@ -1681,13 +1943,14 @@ def _handle_tcp_in_conn(conn):
                     payload = json.loads(line.decode('utf-8'))
                 except Exception:
                     continue
-                if payload.get('proto') != 'pfforth-actor':
+                if not _valid_actor_envelope(payload):
                     continue
                 to_id   = payload.get('to', 0)
                 from_id = payload.get('from', 0)
                 value   = payload.get('msg')
                 with ForthActors._registry_lock:
-                    entry = ForthActors._registry.get(to_id)
+                        to_id = _resolve_actor_id(to_id)
+                        entry = ForthActors._registry.get(to_id)
                 if entry:
                     entry['queue'].put(_ActorMsg(from_id, value))
     except Exception:
@@ -1742,14 +2005,61 @@ def _start_mqtt_out_actor(forth_instance, host, port, topic):
 
     ta_queue  = queue.Queue()
     stop_evt  = threading.Event()
+    mqtt_config = ForthActors._mqtt_actor_config.copy()
 
     def body():
+        import paho.mqtt.client as mqtt
+
         with ForthActors._registry_lock:
             if actor_id in ForthActors._registry:
                 ForthActors._registry[actor_id]['alive'] = True
+
+        # Connexio MQTT persistent per a tota la vida de l'actor, en lloc de
+        # connectar/desconnectar a cada missatge (lent i poc fiable — si la
+        # xarxa triga a establir handshake, el publish es queda penjat i
+        # sovint fa timeout encara que el missatge s'acabi enviant despres).
+        connected_evt = threading.Event()
+
+        def _on_connect(c, userdata, flags, rc, *extra):
+            # Signatura compatible amb paho-mqtt v1 (rc int) i v2 (ReasonCode).
+            ok = (rc == 0) if isinstance(rc, int) else getattr(rc, 'is_failure', False) is False
+            if ok:
+                connected_evt.set()
+
+        def _on_disconnect(c, userdata, *extra):
+            connected_evt.clear()
+
+        client = mqtt.Client()
+        client.on_connect    = _on_connect
+        client.on_disconnect = _on_disconnect
+        client.reconnect_delay_set(min_delay=1, max_delay=5)
+        _configure_mqtt_actor_client(client, mqtt_config)
+
+        def _ensure_connected():
+            if connected_evt.is_set():
+                return True
+            try:
+                client.connect(host, port, keepalive=30)
+                client.loop_start()
+            except Exception:
+                pass
+            return connected_evt.wait(timeout=5.0)
+
         ts = datetime.now().strftime('%H:%M:%S')
         print(f"[{ts}] actor-wifi-out ({actor_id}): "
               f"MQTT {host}:{port}/{topic} listo")
+
+        loop_started = False
+        try:
+            client.connect(host, port, keepalive=30)
+            client.loop_start()
+            loop_started = True
+            connected_evt.wait(timeout=5.0)
+        except Exception as e:
+            ts2 = datetime.now().strftime('%H:%M:%S')
+            print(f"[{ts2}] actor-wifi-out: connexio inicial fallida ({e}), "
+                  f"es reintentara en el primer enviament")
+
         while True:
             msg = ta_queue.get(block=True)
             if msg is _KILL_SENTINEL:
@@ -1761,14 +2071,36 @@ def _start_mqtt_out_actor(forth_instance, host, port, topic):
             env     = _make_actor_envelope(to_id, sender_id, value)
             payload = json.dumps(env, separators=(',', ':')).encode('utf-8')
             try:
-                import paho.mqtt.client as mqtt
-                client = mqtt.Client()
-                client.connect(host, port, keepalive=10)
-                client.publish(topic, payload, qos=1)
-                client.disconnect()
+                if not loop_started:
+                    client.connect(host, port, keepalive=30)
+                    client.loop_start()
+                    loop_started = True
+                if not connected_evt.is_set():
+                    _ensure_connected()
+                result = client.publish(topic, payload, qos=1)
+                # wait_for_publish() no retorna True/False (sempre None a
+                # paho-mqtt >=2): nomes bloqueja fins que es publica o
+                # arriba el timeout. Cal comprovar is_published() despres,
+                # sino sempre semblava "timeout" encara que s'hagues enviat be.
+                try:
+                    result.wait_for_publish(timeout=5.0)
+                except (ValueError, RuntimeError):
+                    pass
+                sent = result.is_published()
+                ts2 = datetime.now().strftime('%H:%M:%S')
+                if sent:
+                    print(f"[{ts2}] actor-wifi-out: enviat → {topic}")
+                else:
+                    print(f"[{ts2}] actor-wifi-out: timeout al enviar → {topic}")
             except Exception as e:
                 ts2 = datetime.now().strftime('%H:%M:%S')
                 print(f"[{ts2}] actor-wifi-out error: {e}")
+
+        try:
+            client.disconnect()
+            client.loop_stop()
+        except Exception:
+            pass
         with ForthActors._registry_lock:
             if actor_id in ForthActors._registry:
                 ForthActors._registry[actor_id]['alive'] = False

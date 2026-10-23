@@ -275,7 +275,29 @@ class ForthCompiler:
                 del self.words[name]
     
     def _tick(self):
-        pass
+        """( "name" -- xt ) Parse a word without executing it."""
+        xt = self._parse_execution_token("'")
+        if xt is not None:
+            self.stack.append(xt)
+
+    def _parse_execution_token(self, operator):
+        """Read the next input token and resolve its current definition."""
+        tokens = getattr(self, '_input_tokens', None)
+        index = getattr(self, '_input_index', 0) + 1
+        if tokens is None or index >= len(tokens):
+            print(f"Error: {operator} requiere nombre de palabra")
+            return None
+        name = tokens[index]
+        self._input_index = index
+        if not isinstance(name, str):
+            print(f"Error: {operator} requiere nombre de palabra")
+            return None
+        xt = self.words.get(name)
+        if xt is None:
+            xt = self.immediate_words.get(name)
+        if xt is None:
+            print(f"Error: palabra desconocida '{name}' para {operator}")
+        return xt
     
     def _execute_word(self):
         if self.stack:
@@ -289,7 +311,27 @@ class ForthCompiler:
                     self.immediate_words[xt]()
     
     def _bracket_tick(self):
-        pass
+        """Compile the parsed execution token as a literal, not a call."""
+        if not self._defining or self._bracket_mode:
+            print("Error: ['] solo se permite durante la compilación")
+            # Consume the quoted name so it is not accidentally executed.
+            tokens = getattr(self, '_input_tokens', None)
+            index = getattr(self, '_input_index', 0) + 1
+            if tokens is not None and index < len(tokens):
+                self._input_index = index
+            return False
+        xt = self._parse_execution_token("[']")
+        if xt is None:
+            # Never publish a partially compiled, misleading definition.
+            self._defining = False
+            self._bracket_mode = False
+            self._current_definition = []
+            self._current_name = None
+            self.variables['state'] = 0
+            return False
+        self._current_source.append(self._input_tokens[self._input_index])
+        self._current_definition.append(('literal', xt))
+        return True
     
     def _throw(self):
         if self.stack:
@@ -350,11 +392,40 @@ class ForthCompiler:
             print("Error: POSTPONE solo en compilación")
     
     def _create(self):
-        pass
+        """Compile CREATE for use inside a defining word.
+
+        CREATE is slightly unusual in this interpreter: at the outermost
+        level the REPL handles the following name immediately, while inside a
+        colon definition it must be deferred until the defining word runs.
+        The runtime operation is represented explicitly rather than as the
+        ordinary ``create`` token, since it also has to consume the name
+        following the invocation (``5 maker child``).
+        """
+        if not self._defining or self._current_definition is None:
+            print("Error: CREATE solo en compilación o como definición directa")
+            return
+        self._current_definition.append(('create_runtime',))
     
     def _does(self):
-        if not self._defining:
+        if not self._defining or self._current_definition is None:
             print("Error: DOES> solo en compilación")
+            return
+
+        # Keep the marker in the same token stream as the defining code.  The
+        # definition finalizer splits it into the CREATE part and the child
+        # runtime part.  This is important for control-flow words: they can
+        # then be compiled and executed by the normal compiled interpreter.
+        if any(isinstance(token, tuple) and token
+               and token[0] == 'does_marker'
+               for token in self._current_definition):
+            print("Error: solo se permite un DOES> por definición")
+            return
+        if not any(isinstance(token, tuple) and token
+                   and token[0] == 'create_runtime'
+                   for token in self._current_definition):
+            print("Error: DOES> requiere CREATE en la definición")
+            return
+        self._current_definition.append(('does_marker',))
     
     def _literal(self):
         if not self._defining or self._current_definition is None:

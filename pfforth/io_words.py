@@ -6,6 +6,7 @@ import sys
 import os
 import select
 
+
 class ForthIO:
     """Mixin providing I/O operations"""
     
@@ -93,40 +94,27 @@ class ForthIO:
     #  Detección de plataforma para key / key?                           #
     # ------------------------------------------------------------------ #
 
+    def _is_ios_terminal(self):
+        """Detect the a-Shell/iOS terminal without changing key's mode."""
+        try:
+            import platform as _pl
+            if '/var/mobile/' in os.environ.get('HOME', ''):
+                return True
+            if os.environ.get('TERM_PROGRAM', '').lower() in ('a-shell', 'a_shell'):
+                return True
+            if any(d in _pl.machine() for d in ('iPhone', 'iPad', 'iPod')):
+                return True
+            return (os.path.exists('/private/var/mobile') and
+                    not os.path.exists('/Applications'))
+        except Exception:
+            return False
+
     def _raw_mode_supported(self):
-        """Devuelve True si el modo raw/cbreak funciona sin romper el PTY.
-        En iOS (a-Shell) el cambio de modo del PTY provoca que el teclado
-        deje de responder — se usa modo línea como fallback seguro."""
+        """key keeps its original line-mode fallback on iOS."""
         if not hasattr(self, '_raw_mode_ok'):
             try:
-                import platform as _pl
-                is_ios = False
-
-                # 1) HOME de a-Shell está dentro del sandbox: /var/mobile/...
-                home = os.environ.get('HOME', '')
-                if '/var/mobile/' in home:
-                    is_ios = True
-
-                # 2) TERM_PROGRAM que a-Shell puede poner
-                if os.environ.get('TERM_PROGRAM', '').lower() in ('a-shell', 'a_shell'):
-                    is_ios = True
-
-                # 3) Machine devuelve modelo de dispositivo iOS (iPhone/iPad)
-                machine = _pl.machine()
-                if any(d in machine for d in ('iPhone', 'iPad', 'iPod')):
-                    is_ios = True
-
-                # 4) Ruta del sistema iOS (puede no ser accesible desde el sandbox,
-                #    pero vale como cuarta salvaguarda)
-                try:
-                    if (os.path.exists('/private/var/mobile') and
-                            not os.path.exists('/Applications')):
-                        is_ios = True
-                except Exception:
-                    pass
-
                 fd_ok = hasattr(sys.stdin, 'fileno') and os.isatty(sys.stdin.fileno())
-                self._raw_mode_ok = fd_ok and not is_ios
+                self._raw_mode_ok = fd_ok and not self._is_ios_terminal()
             except Exception:
                 self._raw_mode_ok = False
         return self._raw_mode_ok
@@ -147,6 +135,61 @@ class ForthIO:
         print(f"key mode: {mode}")
         home = os.environ.get('HOME', '?')
         print(f"  HOME={home}")
+
+    def _restore_key_probe(self):
+        """Restore the terminal when leaving the iOS cbreak input session."""
+        if getattr(self, '_key_probe_active', False):
+            try:
+                import termios
+                termios.tcsetattr(self._key_probe_fd, termios.TCSADRAIN,
+                                  self._key_probe_saved)
+            finally:
+                self._key_probe_active = False
+
+    def _key_probe_input(self, prompt):
+        """Read a REPL line in cbreak, as the validated a-Shell test does."""
+        sys.stdout.write(prompt)
+        sys.stdout.flush()
+        chars = []
+        while True:
+            ch = sys.stdin.read(1)
+            if not ch:
+                raise EOFError
+            if ch in ('\n', '\r'):
+                print()
+                return ''.join(chars)
+            if ch in ('\x7f', '\b'):
+                if chars:
+                    chars.pop()
+                    sys.stdout.write('\b \b')
+                    sys.stdout.flush()
+            elif ch == '\x03':
+                raise KeyboardInterrupt
+            elif ch == '\x04' and not chars:
+                raise EOFError
+            else:
+                chars.append(ch)
+                sys.stdout.write(ch)
+                sys.stdout.flush()
+
+    def _key_probe_ready(self):
+        """Leave cbreak active across key? polls and REPL prompts on iOS."""
+        import termios
+        import tty
+        fd = sys.stdin.fileno()
+        if not os.isatty(fd):
+            return False
+        if not getattr(self, '_key_probe_active', False):
+            saved = termios.tcgetattr(fd)
+            try:
+                tty.setcbreak(fd, termios.TCSANOW)
+            except BaseException:
+                termios.tcsetattr(fd, termios.TCSANOW, saved)
+                raise
+            self._key_probe_fd = fd
+            self._key_probe_saved = saved
+            self._key_probe_active = True
+        return bool(select.select([fd], [], [], 0)[0])
 
     def _key_line_buf(self):
         """Lee un carácter del buffer interno. Si está vacío lee una línea
@@ -183,6 +226,12 @@ class ForthIO:
                 # Windows: getwch() es raw nativo, sin Enter
                 import msvcrt
                 char = msvcrt.getwch()
+                self.stack.append(ord(char) if char else 0)
+
+            elif getattr(self, '_key_probe_active', False):
+                # key? mantiene cbreak en a-Shell; readline() esperaría un
+                # salto de línea que este modo no genera para la tecla Enter.
+                char = sys.stdin.read(1)
                 self.stack.append(ord(char) if char else 0)
 
             elif self._raw_mode_supported():
@@ -231,6 +280,10 @@ class ForthIO:
             elif sys.platform == 'win32':
                 import msvcrt
                 self.stack.append(-1 if msvcrt.kbhit() else 0)
+
+            elif self._is_ios_terminal():
+                # a-Shell: keep cbreak across REPL prompts; key? never reads.
+                self.stack.append(-1 if self._key_probe_ready() else 0)
 
             elif self._raw_mode_supported():
                 # Mac / Linux: cbreak temporal para que select funcione

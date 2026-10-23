@@ -80,7 +80,19 @@ class ForthPersistence:
                     elif def_type == 'constant' and name in self.constants:
                         f.write(f"{self.constants[name]} constant {name}\n")
                     elif def_type == 'value' and name in self.values:
-                        f.write(f"{self.values[name]} value {name}\n")
+                        # Los strings se escriben como s" ..." para que el
+                        # load los restaure como string, no como error
+                        val = self.values[name]
+                        if isinstance(val, str):
+                            if '"' in val or '\n' in val:
+                                # s" no puede contener comillas ni saltos de
+                                # linea: no se puede round-trippear con seguridad
+                                f.write(f'\\ AVISO: value {name} omitido '
+                                        f'(string con comillas o salto de linea)\n')
+                            else:
+                                f.write(f's" {val}" value {name}\n')
+                        else:
+                            f.write(f"{val} value {name}\n")
             
             print(f"Guardado: {filename}")
         except Exception as e:
@@ -439,6 +451,9 @@ class ForthPersistence:
                     print(f"Error: {e}")
             
             self.words[word_name] = code_word_wrapper
+            if not hasattr(self, '_code_word_specs'):
+                self._code_word_specs = {}
+            self._code_word_specs[word_name] = ('inline', compiled_code)
             self._definition_order.append(('code', word_name))
             self._definition_source[word_name] = f"CODE {full_name}\n{code_text}\nENDCODE"
             self._last_defined_word = word_name
@@ -540,6 +555,9 @@ def execute(forth):
                 
                 actual_name = getattr(module, 'WORD_NAME', word_name)
                 self.words[actual_name] = wrapper
+                if not hasattr(self, '_code_word_specs'):
+                    self._code_word_specs = {}
+                self._code_word_specs[actual_name] = ('module', module)
                 self._definition_order.append(('code', actual_name))
                 self._last_defined_word = actual_name
                 

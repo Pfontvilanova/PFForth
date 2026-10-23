@@ -15,11 +15,12 @@ from .io_words import ForthIO
 from .persistence import ForthPersistence
 from .optimizations import ForthOptimizations
 from .actors import ForthActors
+from .http_server import ForthHTTP
 
 
 class Forth(ForthBase, ForthArithmetic, ForthStack, ForthMemory,
             ForthControlFlow, ForthCompiler, ForthIO, ForthPersistence,
-            ForthOptimizations, ForthActors):
+            ForthOptimizations, ForthActors, ForthHTTP):
     """Complete Forth interpreter combining all mixins"""
 
     def __init__(self):
@@ -37,6 +38,7 @@ class Forth(ForthBase, ForthArithmetic, ForthStack, ForthMemory,
         self._register_persistence_words()
         self._register_optimization_words()
         self._register_actor_words()
+        self._register_http_words()
         self.words['help'] = self._help
         self.words['replit-mode'] = self._set_replit_mode
         self.words['standard-mode'] = self._set_standard_mode
@@ -44,9 +46,13 @@ class Forth(ForthBase, ForthArithmetic, ForthStack, ForthMemory,
     
     def execute(self, text):
         """Execute Forth code"""
-        tokens = self._simple_tokenize(text)
-        self._execute_tokens(tokens)
-        return self
+        try:
+            tokens = self._simple_tokenize(text)
+            self._execute_tokens(tokens)
+            return self
+        finally:
+            if not getattr(self, '_key_probe_repl', False):
+                self._restore_key_probe()
     
     def _execute_tokens(self, tokens):
         """Execute a list of tokens"""
@@ -207,7 +213,9 @@ class Forth(ForthBase, ForthArithmetic, ForthStack, ForthMemory,
                         i = result
                         continue
                     self.immediate_words[token]()
-                    i += 1
+                    # Parsing immediates (including a postponed [']) can
+                    # consume the following name from the caller's input.
+                    i = max(i + 1, self._input_index + 1)
                     continue
                 
                 if self._use_inline_cache:
@@ -315,14 +323,9 @@ class Forth(ForthBase, ForthArithmetic, ForthStack, ForthMemory,
                     continue
             
             if token == "'":
-                if i + 1 < len(tokens):
-                    word_name = tokens[i + 1]
-                    if word_name in self.words:
-                        self.stack.append(self.words[word_name])
-                    elif word_name in self.immediate_words:
-                        self.stack.append(self.immediate_words[word_name])
-                    i += 2
-                    continue
+                self._tick()
+                i = self._input_index + 1
+                continue
             
             if token == 'create':
                 if i + 1 < len(tokens):
@@ -470,6 +473,11 @@ class Forth(ForthBase, ForthArithmetic, ForthStack, ForthMemory,
 
     def _handle_immediate_during_compile(self, token, tokens, i):
         """Handle immediate words during compilation"""
+        if token == "[']":
+            if self._bracket_tick():
+                return self._input_index + 1
+            return len(tokens)
+
         if token == 'if':
             self._current_definition.append(('if_start',))
             return i + 1
@@ -579,10 +587,47 @@ class Forth(ForthBase, ForthArithmetic, ForthStack, ForthMemory,
         self._defining = False
         self.variables['state'] = 0
         
-        compiled_def = self._compile_definition(self._current_definition)
+        # DOES> divides a defining word into two independently executable
+        # parts.  The part before DOES> runs when the defining word is called;
+        # the part after it becomes the behavior of the word created at that
+        # call.  Keep CREATE as an explicit runtime operation so it can read
+        # the next input token as the child name.
+        definition_tokens = self._current_definition
+        does_index = next(
+            (i for i, token in enumerate(definition_tokens)
+             if isinstance(token, tuple) and token
+             and token[0] == 'does_marker'),
+            None,
+        )
+        if does_index is None:
+            defining_tokens = definition_tokens
+            does_tokens = None
+        else:
+            defining_tokens = definition_tokens[:does_index]
+            does_tokens = definition_tokens[does_index + 1:]
+
+        compiled_def = self._compile_definition(defining_tokens)
+        compiled_does = (
+            self._compile_definition(does_tokens)
+            if does_tokens is not None else None
+        )
+        if compiled_does is not None:
+            # Attach the child behavior to every CREATE in the defining
+            # portion.  A defining word normally has one CREATE, but retaining
+            # the operation as a token makes malformed/more advanced
+            # definitions deterministic instead of silently dropping DOES>.
+            compiled_def = [
+                ('create_runtime', compiled_does, self._current_locals[:])
+                if isinstance(token, tuple) and token
+                and token[0] == 'create_runtime' else token
+                for token in compiled_def
+            ]
         local_names = self._current_locals[:]
         
         def word_action(definition=compiled_def, locals_list=local_names):
+            reservation_start = len(
+                getattr(self, '_runtime_create_reservations', [])
+            )
             if locals_list:
                 if len(self.stack) < len(locals_list):
                     print(f"Error: no hay suficientes valores para locals")
@@ -597,6 +642,16 @@ class Forth(ForthBase, ForthArithmetic, ForthStack, ForthMemory,
             finally:
                 if locals_list:
                     self._locals_stack.pop()
+                # A CREATE data field is reserved after its defining code has
+                # run.  This preserves the traditional ``create ,`` layout
+                # (the comma stores at the address CREATE left on the stack)
+                # while ensuring CREATE with no ALLOT still gives each child a
+                # distinct one-cell field.
+                reservations = getattr(self, '_runtime_create_reservations', [])
+                for address in reservations[reservation_start:]:
+                    if self.here <= address:
+                        self.here = address + 1
+                del reservations[reservation_start:]
         
         if self._noname_mode:
             self._noname_mode = False
@@ -630,6 +685,10 @@ class Forth(ForthBase, ForthArithmetic, ForthStack, ForthMemory,
             try:
                 self._run_compiled_inner(compiled, local_names)
             finally:
+                # EXIT belongs to this definition, not its caller or the
+                # next REPL input. Nested control-flow blocks (root=False)
+                # must still propagate it to the enclosing definition.
+                self._exit_flag = False
                 self._recurse_context = old_context
         else:
             self._run_compiled_inner(compiled, local_names)
@@ -676,6 +735,13 @@ class Forth(ForthBase, ForthArithmetic, ForthStack, ForthMemory,
                     self._execute_py_exec(token[1])
                 elif op == 'cached':
                     token[2]()
+                elif op == 'create_runtime':
+                    # The extended form is emitted by _finish_definition:
+                    # ('create_runtime', does_body, does_locals).  The
+                    # one-element form is CREATE in a plain defining word.
+                    does_body = token[1] if len(token) > 1 else None
+                    does_locals = token[2] if len(token) > 2 else []
+                    self._runtime_create(does_body, does_locals)
                 elif op == 'locals':
                     pass
                 elif op == 'to_local':
@@ -754,6 +820,66 @@ class Forth(ForthBase, ForthArithmetic, ForthStack, ForthMemory,
                         print(f"? {token}")
             
             i += 1
+
+    def _runtime_create(self, does_body=None, does_locals=None):
+        """Execute CREATE from a compiled defining word.
+
+        The defining word's next source token is the name of the child.  The
+        REPL index is advanced here so the outer token loop does not execute
+        that name as an ordinary word.  A child always receives its captured
+        data-field address when invoked; with DOES> its post-DOES body then
+        runs normally through the compiled interpreter.
+        """
+        tokens = getattr(self, '_input_tokens', None)
+        index = getattr(self, '_input_index', -1)
+        name_index = index + 1
+        if not tokens or name_index >= len(tokens):
+            print("Error: CREATE requiere el nombre siguiente en la entrada")
+            return
+
+        name = tokens[name_index]
+        if not isinstance(name, str):
+            print("Error: CREATE requiere un nombre de palabra")
+            return
+        if not name:
+            print("Error: CREATE requiere un nombre de palabra")
+            return
+
+        self._input_index = name_index
+        address = self.here
+        self._last_created_word = name
+        self._last_created_address = address
+
+        post_locals = list(does_locals or [])
+
+        def child_action(
+                field_address=address,
+                definition=does_body,
+                locals_list=post_locals,
+        ):
+            self.stack.append(field_address)
+            if definition is None:
+                return
+            if locals_list:
+                if len(self.stack) < len(locals_list):
+                    print("Error: no hay suficientes valores para locals")
+                    return
+                local_dict = {}
+                for local_name in reversed(locals_list):
+                    local_dict[local_name] = self.stack.pop()
+                self._locals_stack.append(local_dict)
+            try:
+                self._run_compiled(definition, locals_list)
+            finally:
+                if locals_list:
+                    self._locals_stack.pop()
+
+        self.words[name] = child_action
+        self._definition_order.append(('created', name))
+        self._runtime_create_reservations = getattr(
+            self, '_runtime_create_reservations', []
+        )
+        self._runtime_create_reservations.append(address)
     
     def _extract_if_block(self, tokens, start):
         """Extract IF...ELSE...THEN block"""
@@ -1010,6 +1136,16 @@ class ForthREPL:
         parse_match = re.search(r'\bparse\b', line_lower)
         if not parse_match:
             return False
+
+        # PARSE inside a colon definition is compiled, not executed now.
+        # Do not ask the REPL for delimiter-terminated input until the
+        # resulting word is invoked.
+        if getattr(self, '_defining', False):
+            return False
+        colon = line.rfind(':', 0, parse_match.start())
+        semicolon = line.find(';', parse_match.end())
+        if colon >= 0 and semicolon >= 0:
+            return False
         
         after_parse = line[parse_match.end():]
         return delimiter not in after_parse
@@ -1077,6 +1213,15 @@ class ForthREPL:
         print("Modo estandar activado")
     
     def repl(self, readline_mode=False, ipython_mode=None, replit_mode=None):
+        """Keep the iOS key? cbreak terminal alive for the REPL session."""
+        self._key_probe_repl = True
+        try:
+            return self._repl_loop(readline_mode, ipython_mode, replit_mode)
+        finally:
+            self._key_probe_repl = False
+            self._restore_key_probe()
+
+    def _repl_loop(self, readline_mode=False, ipython_mode=None, replit_mode=None):
         """Start interactive REPL
         
         Args:
@@ -1109,6 +1254,11 @@ class ForthREPL:
             get_input = input
         
         self._repl_input_fn = get_input
+
+        def read_continuation(prompt):
+            if getattr(self, '_key_probe_active', False):
+                return self._key_probe_input(prompt)
+            return get_input(prompt)
         
         if replit_mode:
             print("(Modo Replit - usa 'standard-mode' para desactivar)")
@@ -1125,7 +1275,9 @@ class ForthREPL:
                     prompt = "OK> "
                 
                 try:
-                    if getattr(self, '_tty_needs_restore', False):
+                    if getattr(self, '_key_probe_active', False):
+                        line = self._key_probe_input(prompt)
+                    elif getattr(self, '_tty_needs_restore', False):
                         # key() manipuló el terminal (setcbreak).
                         # Intentamos restaurar los settings canónicos.
                         try:
@@ -1188,7 +1340,7 @@ class ForthREPL:
                     accumulated = line
                     while True:
                         try:
-                            cont_line = get_input("... ")
+                            cont_line = read_continuation("... ")
                             accumulated += '\n' + cont_line
                             if '|' in cont_line:
                                 break
@@ -1202,7 +1354,7 @@ class ForthREPL:
                     accumulated = line
                     while True:
                         try:
-                            cont_line = get_input("py{> ")
+                            cont_line = read_continuation("py{> ")
                             accumulated += '\n' + cont_line
                             if '}py' in cont_line:
                                 break
@@ -1216,7 +1368,7 @@ class ForthREPL:
                     accumulated = line
                     while True:
                         try:
-                            cont_line = get_input("py[> ")
+                            cont_line = read_continuation("py[> ")
                             accumulated += '\n' + cont_line
                             if ']py' in cont_line:
                                 break
@@ -1232,7 +1384,7 @@ class ForthREPL:
                         accumulated = line
                         while True:
                             try:
-                                cont_line = get_input("... ")
+                                cont_line = read_continuation("... ")
                                 accumulated += '\n' + cont_line
                                 if delimiter in cont_line:
                                     break
@@ -1250,6 +1402,9 @@ class ForthREPL:
                     print()
                 
             except KeyboardInterrupt:
+                if getattr(self, '_key_probe_active', False):
+                    print("\nkey? interromput; sortint del REPL")
+                    break
                 print("\n(Ctrl+C) Usa 'bye' para salir")
             except Exception as e:
                 print(f"Error: {e}")
