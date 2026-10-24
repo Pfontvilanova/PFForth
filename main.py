@@ -44,7 +44,7 @@ def main():
             print(__doc__)
     else:
         print("=" * 60)
-        print("PFForth v2.0 - Modular Edition")
+        print("PFForth v3.0 - Modular Edition")
         print("Pere Font 2025")
         print("=" * 60)
         print()
